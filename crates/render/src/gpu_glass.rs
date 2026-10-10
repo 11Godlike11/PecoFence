@@ -215,10 +215,11 @@ pub struct Stats {
     pub control_map_builds: u64,
 }
 
-/// kube.io's SVG chain: displace the backdrop once, let a strongly saturated copy of the
-/// refracted backdrop show through the specular ring, then light the ring itself.
-const RIM_SATURATION: f32 = 6.0;
-const RIM_LIGHT: f32 = 0.4;
+/// Broad neutral reflections and a restrained underside shade reveal the rounded cap.
+const RIM_SATURATION: f32 = 0.65;
+const RIM_TINT_OPACITY: f32 = 0.06;
+const RIM_LIGHT: f32 = 0.24;
+const SHOULDER_SHADE: f32 = 0.10;
 
 /// feColorMatrix `saturate` (Rec. 709 luma weights) in D2D's input-row layout.
 fn saturation_matrix(s: f32) -> [f32; 20] {
@@ -249,6 +250,7 @@ struct Effects {
     displace: b::ID2D1Effect,
     rim: b::ID2D1Effect,
     light: b::ID2D1Effect,
+    shade: b::ID2D1Effect,
     output: b::ID2D1Effect,
     surface: Rc<Wallpaper>,
     geometry: Option<(u32, u32, u32, u32)>,
@@ -283,7 +285,11 @@ impl Effects {
             b::D2D1_CHANNEL_SELECTOR_G,
         )?;
         let saturate = effect(&b::CLSID_D2D1ColorMatrix)?;
-        color_matrix(&saturate, saturation_matrix(RIM_SATURATION))?;
+        let mut rim_tint = saturation_matrix(RIM_SATURATION);
+        // Scale premultiplied colour and alpha together so the reflection cannot whiten
+        // or saturate the shoulder when its opacity is reduced.
+        rim_tint.iter_mut().for_each(|v| *v *= RIM_TINT_OPACITY);
+        color_matrix(&saturate, rim_tint)?;
         property(
             &saturate,
             b::D2D1_COLORMATRIX_PROP_CLAMP_OUTPUT,
@@ -294,6 +300,10 @@ impl Effects {
         let rim = effect(&b::CLSID_D2D1AlphaMask)?;
         let light = effect(&b::CLSID_D2D1ColorMatrix)?;
         color_matrix(&light, light_matrix(RIM_LIGHT))?;
+        let shade = effect(&b::CLSID_D2D1ColorMatrix)?;
+        let mut dark = [0.0; 20];
+        dark[15] = SHOULDER_SHADE;
+        color_matrix(&shade, dark)?;
         let composite = effect(&b::CLSID_D2D1Composite)?;
         let output = effect(&b::CLSID_D2D1ColorMatrix)?;
         unsafe {
@@ -301,10 +311,11 @@ impl Effects {
             displace.SetInput(0, &position.GetOutput()?, true);
             saturate.SetInput(0, &displace.GetOutput()?, true);
             rim.SetInput(0, &saturate.GetOutput()?, true);
-            composite.SetInputCount(3).ok()?;
+            composite.SetInputCount(4).ok()?;
             composite.SetInput(0, &displace.GetOutput()?, true);
             composite.SetInput(1, &rim.GetOutput()?, true);
             composite.SetInput(2, &light.GetOutput()?, true);
+            composite.SetInput(3, &shade.GetOutput()?, true);
             output.SetInput(0, &composite.GetOutput()?, true);
         }
         Ok(Self {
@@ -314,6 +325,7 @@ impl Effects {
             displace,
             rim,
             light,
+            shade,
             output,
             surface: Rc::new(Wallpaper {
                 image: unsafe { composite.GetOutput()? },
@@ -379,6 +391,15 @@ impl Effects {
             b::DXGI_FORMAT_A8_UNORM,
         )?
         .cast::<b::ID2D1Image>()?;
+        let shade = bitmap(
+            context,
+            field.rim_width,
+            field.rim_height,
+            field.shade.as_ptr().cast(),
+            field.rim_width,
+            b::DXGI_FORMAT_A8_UNORM,
+        )?
+        .cast::<b::ID2D1Image>()?;
         scalar(
             &self.displace,
             b::D2D1_DISPLACEMENTMAP_PROP_SCALE,
@@ -390,6 +411,7 @@ impl Effects {
             self.displace.SetInput(1, &map_scale.GetOutput()?, true);
             self.rim.SetInput(1, &ring, true);
             self.light.SetInput(0, &ring, true);
+            self.shade.SetInput(0, &shade, true);
         }
         self.geometry = Some(key);
         Ok(true)

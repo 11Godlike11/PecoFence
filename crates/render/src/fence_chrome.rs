@@ -2554,15 +2554,15 @@ mod tests {
     #[test]
     fn glass_header_controls_follow_the_plate_and_leave_room_for_captions() {
         let theme = Theme::light().with_liquid_glass();
-        // 16 DIP plate minus the 4 DIP inset; a 2 DIP row would clamp to its own half height.
+        // The broad plate radius clamps to each small control's own half height.
         for width in [40.0, 80.0, 160.0] {
             let rect = Rect::from_xywh(8.0, 4.0, width, 28.0);
-            assert_eq!(header_control_radius(&theme, rect), 12.0);
+            assert_eq!(header_control_radius(&theme, rect), 14.0);
         }
         let chevron = TitleDeco::chevron_box(320.0, 36.0);
         assert_eq!(
             header_control_radius(&theme, chevron),
-            12.0f32.min(chevron.width().min(chevron.height()) * 0.5)
+            28.0f32.min(chevron.width().min(chevron.height()) * 0.5)
         );
         assert_eq!(
             header_control_radius(&theme, Rect::from_xywh(0.0, 0.0, 40.0, 2.0)),

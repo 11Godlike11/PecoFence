@@ -1,7 +1,13 @@
 # Wallpaper Engine personal build
 
 This fork adds live Wallpaper Engine backgrounds to **Liquid Glass**. Version
-`0.1.5-we.1` is based on upstream PecoFence 0.1.5.
+`0.1.5-we.2` is based on upstream PecoFence 0.1.5. This revision redesigns the GPU
+optical surface: a 32 DIP elliptical shoulder replaces the narrow quartic bezel,
+and a shallow dome gently magnifies the face by 2.4%. Broad directional highlights,
+a restrained underside shade and larger corners make the glass read as a rounded
+volume. Reflection tint is slightly desaturated and blends at 6%; it no longer
+forms a highly saturated closed ring. Small controls scale the whole cross-section.
+The geometry and light masks remain cached between wallpaper frames.
 
 ## Supported path
 
@@ -45,6 +51,8 @@ cargo build --locked --release -p pecofence -p pecofence-watchdog
 cargo build --locked --release -p pecofence-cli
 cargo fmt --all --check
 cargo clippy -p pecofence -p pecofence-platform --all-targets -- -D warnings
+cargo clippy -p pecofence-render --all-targets -- -D warnings
+cargo test -p pecofence-render --lib
 cargo test -p pecofence-core updates::tests
 cargo run -p pecofence-platform --example live_wallpaper_probe -- .cache/live-probe
 ```
@@ -58,9 +66,12 @@ seconds, and the two visible-desktop samples differed. An isolated application
 instance displayed the captured rain wallpaper with refracting glass edges and
 survived switching Fluent → Liquid Glass. The installed build was then replaced
 after backing up the original executable and configuration; the user confirmed
-the real desktop fences display the Wallpaper Engine wallpaper.
+the real desktop fences display the Wallpaper Engine wallpaper. The revised
+optics were compared using GPU renders over the same captured rain frame, including
+a narrow tab strip. Regression checks cover DPI invariance, corner continuity,
+the shoulder-to-face transition and directional reflection width.
 
-A five-second sample with five installed fences measured about 1.4% of total CPU
+A five-second sample of `0.1.5-we.1` with five installed fences measured about 1.4% of total CPU
 capacity on a 20-logical-processor machine and a 109 MB working set. This is a
 short local observation, not a guarantee for other wallpapers or hardware.
 

@@ -1,10 +1,9 @@
 //! Cached Liquid Glass optics over the monitor wallpaper.
 //!
-//! The GPU plate (`displacement_field`, evaluated by `gpu_glass`) follows kube.io's model:
-//! a convex squircle bezel refracts a vertical ray with Snell's law, all bending sits in a
-//! narrow rim and the flat face stays perfectly clear
-//! (<https://kube.io/blog/liquid-glass-css-svg/>). Geometry is cached independently of
-//! wallpaper position. The older CPU path (`crop`, `refracted_overlay`) keeps its own
+//! The GPU plate (`displacement_field`, evaluated by `gpu_glass`) uses an elliptical
+//! shoulder with Snell refraction, a broad directional reflection and a soft underside.
+//! Geometry is cached independently of wallpaper position.
+//! The older CPU path (`crop`, `refracted_overlay`) keeps its own
 //! hand-tuned bezel and remains for comparison renders only.
 
 use crate::theme::{Theme, with_alpha};
@@ -31,10 +30,10 @@ pub fn draw_reflection(
         Vector2::new(0.0, 0.0),
         Vector2::new(width * 0.3, height.max(1.0)),
         &[
-            GradientStop::new(0.0, with_alpha(white, 0.018 * light)),
-            GradientStop::new(0.18, clear),
-            GradientStop::new(0.88, clear),
-            GradientStop::new(1.0, with_alpha(white, 0.008)),
+            GradientStop::new(0.0, with_alpha(white, 0.045 * light)),
+            GradientStop::new(0.32, with_alpha(white, 0.016)),
+            GradientStop::new(0.82, clear),
+            GradientStop::new(1.0, with_alpha(white, 0.012)),
         ],
     )?;
     session.fill_rounded_rect(
@@ -44,7 +43,7 @@ pub fn draw_reflection(
     let hair = 1.0 / scale.max(0.5);
     // Broad reflections are part of the continuous optical surface below. Keep the
     // sharp outer reflection here, without a second closed contour inside the plate.
-    for (inset, alpha) in [(0.5 * hair, 1.0), (1.5 * hair, 0.24)] {
+    for (inset, alpha) in [(0.5 * hair, 0.22), (1.5 * hair, 0.04)] {
         if width <= inset * 2.0 || height <= inset * 2.0 {
             continue;
         }
@@ -189,35 +188,26 @@ fn inward_direction(
     (dx * inverse_length, dy * inverse_length)
 }
 
-/// Width of the GPU plate's curved bezel in DIPs. kube's profile assumes a corner at least
-/// this round, so smaller corners (rolled fences, tabs) shrink the bezel with them.
-pub(crate) const BEZEL_DIP: f32 = 16.0;
-/// Flat glass thickness and bezel height as multiples of the bezel width. The fence plate
-/// uses kube's shape at a 16 DIP bezel: ~18 DIP of displacement at the rim.
-const GLASS_BASE: f64 = 2.0;
-const GLASS_HEIGHT: f64 = 1.25;
-/// kube's bezel folds ~5 DIP from the rim and recovers by ~12 DIP. On a large clear face
-/// that recovery reads as an inner frame, so a long monotone tail, amount·(1 − d/width)³,
-/// eases the magnification out instead. Short plates scale it so it ends at their centre.
-const TAIL_DIP: f32 = 40.0;
-const TAIL_AMOUNT_DIP: f32 = 6.0;
-/// The profile falls from its maximum to a third of it within ~2 DIP of the rim, so the
-/// map needs finer texels than the smooth face would.
+/// A wider, circular shoulder makes the plate read as a rounded volume. Small controls
+/// scale the whole cross-section, rather than squeezing a full-sized lens into a capsule.
+pub(crate) const BEZEL_DIP: f32 = 32.0;
+const GLASS_BASE: f64 = 0.5;
+const GLASS_HEIGHT: f64 = 1.0;
+/// A shallow dome gently magnifies the whole face, instead of leaving an optically flat
+/// rectangle surrounded by a lens. It fades in behind the shoulder and vanishes at centre.
+const FACE_MAGNIFICATION: f32 = 0.024;
 const MAP_TEXELS_PER_DIP: f32 = 1.0;
 const LUT_SAMPLES: usize = 256;
 
-/// kube.io's refraction model ("Liquid Glass in the Browser: Refraction with CSS and
-/// SVG"): a vertical ray through a convex squircle bezel at normalised position `x`
-/// (0 = rim, 1 = flat face) lands this far inward, in bezel widths. `base` is the flat
-/// glass thickness and `height` the bezel height, both in bezel widths; the factor ½ is
-/// kube's SVG map encoding, kept so its published maps are the reference.
-fn kube_offset(x: f64, base: f64, height: f64) -> f64 {
-    let surface = |x: f64| (1.0 - (1.0 - x).powi(4)).max(0.0).powf(0.25);
+/// Vertical ray through an elliptical cap. The analytical normal avoids the very steep
+/// quartic shoulder of the upstream profile; its broad bend carries the sense of thickness.
+/// A gradual thickness taper eases to a zero derivative at the face, preventing an
+/// inner contour without introducing a short, steep recovery section.
+fn rounded_offset(x: f64) -> f64 {
+    let x = x.clamp(0.0, 1.0);
     let eta = 1.0 / 1.5;
-    let y = surface(x);
-    // kube's one-sided difference: the analytic slope is infinite at the rim.
-    let step = if x < 1.0 { 1e-4 } else { -1e-4 };
-    let slope = (surface(x + step) - y) / step;
+    let y = (x * (2.0 - x)).sqrt();
+    let slope = GLASS_HEIGHT * (1.0 - x) / y.max(1e-6);
     let length = (slope * slope + 1.0).sqrt();
     let (nx, ny) = (-slope / length, -1.0 / length);
     let k = 1.0 - eta * eta * (1.0 - ny * ny);
@@ -226,20 +216,18 @@ fn kube_offset(x: f64, base: f64, height: f64) -> f64 {
     }
     let q = k.sqrt();
     let (rx, ry) = (-(eta * ny + q) * nx, eta - (eta * ny + q) * ny);
-    0.5 * rx * (y * height + base) / ry
+    let ease = 1.0 - x * x;
+    rx * (y * GLASS_HEIGHT + GLASS_BASE) / ry * ease
 }
 
 fn offset_lut() -> &'static [f32; LUT_SAMPLES + 1] {
     static LUT: std::sync::OnceLock<[f32; LUT_SAMPLES + 1]> = std::sync::OnceLock::new();
     LUT.get_or_init(|| {
-        std::array::from_fn(|i| {
-            kube_offset(i as f64 / LUT_SAMPLES as f64, GLASS_BASE, GLASS_HEIGHT) as f32
-        })
+        std::array::from_fn(|i| rounded_offset(i as f64 / LUT_SAMPLES as f64) as f32)
     })
 }
 
-/// Inward displacement in bezel widths at `depth` bezel widths from the rim; zero past the
-/// bezel. The rim bends hardest and the mapping folds there, as real glass does.
+/// Inward displacement in bezel widths at `depth` bezel widths from the rim.
 fn bezel_offset(depth: f32) -> f32 {
     if depth >= 1.0 {
         return 0.0;
@@ -251,15 +239,18 @@ fn bezel_offset(depth: f32) -> f32 {
     lut[i] + (lut[i + 1] - lut[i]) * t
 }
 
-/// kube's specular ring: 2 DIP wide, peaking 1 DIP inside the rim, brightest where the
-/// edge faces the light at 60 degrees (either side). Returns the ring's alpha.
-fn rim_light(nx: f32, ny: f32, depth: f32) -> f32 {
-    if !(0.0..=2.0).contains(&depth) {
-        return 0.0;
+/// Reflection rolls across the shoulder rather than drawing a closed bright ring.
+/// A small opposite bounce and a separate underside shade retain depth on dark wallpaper.
+fn shoulder_light(nx: f32, ny: f32, depth: f32, bezel: f32) -> (f32, f32) {
+    if bezel <= 0.0 || !(0.0..bezel).contains(&depth) {
+        return (0.0, 0.0);
     }
-    let profile = (1.0 - (1.0 - depth).powi(2)).max(0.0).sqrt();
-    let facing = (nx * 0.5 - ny * 0.866_025_4).abs() * profile;
-    facing * facing
+    let t = depth / bezel;
+    let shoulder = (std::f32::consts::PI * t.sqrt()).sin().max(0.0).powi(2);
+    let facing = nx * 0.5 - ny * 0.866_025_4;
+    let highlight = (facing.max(0.0).powi(2) + 0.22 * (-facing).max(0.0).powi(2)) * shoulder;
+    let shade = (-facing).max(0.0).powi(2) * shoulder;
+    (highlight, shade)
 }
 
 /// IEEE half precision; the map stays within 0..=1, where 0.5 (no displacement) is exact.
@@ -287,6 +278,7 @@ pub(crate) struct DisplacementField {
     pub rgba: Vec<u16>,
     /// A8 specular ring at device resolution, the size of the plate.
     pub rim: Vec<u8>,
+    pub shade: Vec<u8>,
     pub rim_width: u32,
     pub rim_height: u32,
     pub scale_px: f32,
@@ -302,13 +294,8 @@ pub(crate) fn displacement_field(
     let (w, h) = (width as f32 / scale, height as f32 / scale);
     let radius = radius.min(w.min(h) * 0.5).max(0.0);
     let bezel = BEZEL_DIP.min(radius);
-    let tail = TAIL_DIP.min(w.min(h) * 0.5);
-    let tail_amount = TAIL_AMOUNT_DIP * (tail / TAIL_DIP).min(bezel / BEZEL_DIP);
-    // The tail reaches past the corner radius: take its direction from a box rounded as
-    // far as the tail reaches, so the corner diagonals cannot crease.
-    let tail_radius = tail.max(radius);
-    let reach = bezel.max(tail);
-    let max_offset = offset_lut().iter().fold(0.0f32, |m, v| m.max(v.abs())) * bezel + tail_amount;
+    let max_offset = offset_lut().iter().fold(0.0f32, |m, v| m.max(v.abs())) * bezel
+        + w.max(h) * 0.5 * FACE_MAGNIFICATION;
     let scale_px = (2.0 * max_offset * scale).max(1.0);
     let map_w = (w * MAP_TEXELS_PER_DIP).ceil().max(2.0) as u32;
     let map_h = (h * MAP_TEXELS_PER_DIP).ceil().max(2.0) as u32;
@@ -323,30 +310,22 @@ pub(crate) fn displacement_field(
     // The field is mirror-symmetric: evaluate the top-left quadrant and reflect it.
     for y in 0..map_h.div_ceil(2) {
         let py = (y as f32 + 0.5) * h / map_h as f32;
-        let (my, inner_row) = (map_h - 1 - y, py > reach + 1.0);
+        let my = map_h - 1 - y;
         for x in 0..map_w.div_ceil(2) {
             let px = (x as f32 + 0.5) * w / map_w as f32;
-            if inner_row && px > reach + 1.0 {
-                continue;
-            }
             let (nx, ny, depth) = edge(px, py, w, h, radius);
             let rim = if bezel > 0.0 && depth < bezel {
                 bezel * bezel_offset(depth / bezel)
             } else {
                 0.0
             };
-            let (tx, ty, tail_depth) = edge(px, py, w, h, tail_radius);
-            let eased = if tail > 0.0 && tail_depth < tail {
-                tail_amount * (1.0 - tail_depth.max(0.0) / tail).powi(3)
-            } else {
-                0.0
-            };
-            if rim == 0.0 && eased == 0.0 {
+            if bezel <= 0.0 {
                 continue;
             }
-            // Sample inward: the convex rim compresses the backdrop behind it.
-            let dx = (nx * rim + tx * eased) * scale;
-            let dy = (ny * rim + ty * eased) * scale;
+            let dome = FACE_MAGNIFICATION * smootherstep(depth / bezel);
+            // Sample inward through both the shoulder and the gently domed face.
+            let dx = (nx * rim + (px - w * 0.5) * dome) * scale;
+            let dy = (ny * rim + (py - h * 0.5) * dome) * scale;
             let mx = map_w - 1 - x;
             put(x, y, dx, dy);
             if mx != x {
@@ -361,11 +340,9 @@ pub(crate) fn displacement_field(
         }
     }
     let mut rim = vec![0u8; width as usize * height as usize];
-    // Only pixels within the ring's 2 DIP (plus the corners) can be lit.
-    let band = ((2.0 + radius) * scale).ceil() as u32 + 1;
-    let side = (2.0 * scale).ceil() as u32 + 1;
-    // The light is lit from both sides of one diagonal: a half turn maps the ring onto
-    // itself, so the lower half is the upper half rotated.
+    let mut shade = vec![0u8; rim.len()];
+    let band = ((bezel + radius) * scale).ceil() as u32 + 1;
+    let side = (bezel * scale).ceil() as u32 + 1;
     let last = (width * height) as usize - 1;
     for y in 0..height.div_ceil(2) {
         let py = (y as f32 + 0.5) / scale;
@@ -377,10 +354,13 @@ pub(crate) fn displacement_field(
                 continue;
             }
             let (nx, ny, depth) = edge((x as f32 + 0.5) / scale, py, w, h, radius);
-            let alpha = rim_light(nx, ny, depth);
+            let (alpha, dark) = shoulder_light(nx, ny, depth, bezel);
+            let (opposite_alpha, opposite_dark) = shoulder_light(-nx, -ny, depth, bezel);
             let i = (y * width + x) as usize;
             rim[i] = (alpha * 255.0).round().clamp(0.0, 255.0) as u8;
-            rim[last - i] = rim[i];
+            rim[last - i] = (opposite_alpha * 255.0).round().clamp(0.0, 255.0) as u8;
+            shade[i] = (dark * 255.0).round().clamp(0.0, 255.0) as u8;
+            shade[last - i] = (opposite_dark * 255.0).round().clamp(0.0, 255.0) as u8;
             x += 1;
         }
     }
@@ -389,6 +369,7 @@ pub(crate) fn displacement_field(
         height: map_h,
         rgba,
         rim,
+        shade,
         rim_width: width,
         rim_height: height,
         scale_px,
@@ -702,185 +683,119 @@ mod tests {
     }
 
     #[test]
-    fn profile_reproduces_kube_published_map() {
-        // kube.io ships a 640x63 search bar map (bezel 26, glass 50, bezel height 20 CSS
-        // px); these offsets were read from its centre column.
-        let measured = [
-            (0.0, 27.96),
-            (1.5, 19.47),
-            (4.5, 9.81),
-            (6.0, 7.17),
-            (9.0, 4.24),
-        ];
-        for (depth, expected) in measured {
-            let x = depth / 26.0;
-            let got = 26.0 * kube_offset(x, 50.0 / 26.0, 20.0 / 26.0);
-            assert!((got - expected).abs() < 0.8, "{depth}: {got} vs {expected}");
+    fn elliptical_shoulder_has_broad_bending_and_a_smooth_endpoint() {
+        assert!((0.4..0.6).contains(&bezel_offset(0.0)));
+        assert!(
+            bezel_offset(0.5) > 0.15,
+            "bend must extend across the shoulder"
+        );
+        for i in 0..=1000 {
+            let value = bezel_offset(i as f32 / 1000.0);
+            assert!(value.is_finite() && (0.0..0.7).contains(&value));
         }
-        let rim = BEZEL_DIP * bezel_offset(0.0);
-        assert!((17.0..19.0).contains(&rim), "fence rim bends {rim} DIP");
-        // The peak sits just inside the rim, where the squircle has already risen.
-        assert!(bezel_offset(0.004) > bezel_offset(0.0));
-        let mut previous = f32::INFINITY;
-        for i in 1..=100 {
-            let offset = bezel_offset(i as f32 / 100.0);
-            assert!(offset.is_finite() && offset >= 0.0 && offset <= previous + 1e-6);
-            previous = offset;
-        }
+        assert!(
+            BEZEL_DIP * bezel_offset(0.99) < 0.01,
+            "end of shoulder must be subpixel"
+        );
         assert_eq!(bezel_offset(1.0), 0.0);
         assert_eq!(bezel_offset(2.0), 0.0);
     }
 
     #[test]
-    fn gpu_field_bends_only_the_rim_and_keeps_the_face_clear() {
-        let field = displacement_field(800, 600, 2.0, 16.0);
+    fn gpu_field_is_symmetric_dpi_independent_and_gently_magnifies_the_face() {
+        let field = displacement_field(800, 600, 2.0, BEZEL_DIP);
         assert_eq!((field.width, field.height), (400, 300));
         assert_eq!((field.rim_width, field.rim_height), (800, 600));
-        let rim = texel_offset(&field, 0, 150).0;
-        assert!(rim > 30.0, "left rim samples inward by {rim} px");
-        assert!(texel_offset(&field, 399, 150).0 < -30.0);
+        assert!(texel_offset(&field, 0, 150).0 > 20.0);
+        assert!(texel_offset(&field, 399, 150).0 < -20.0);
+        assert!(texel_offset(&field, 16, 150).0 > 10.0);
         assert!(
-            texel_offset(&field, 200, 0).1 > 30.0,
-            "top rim samples downward"
+            texel_offset(&field, 80, 150).0 > 4.0,
+            "face must be a shallow lens"
         );
-        for y in 40..260 {
-            for x in 40..360 {
-                let i = (y * 400 + x) * 4;
-                assert_eq!(field.rgba[i], 0x3800, "flat face moved at {x},{y}");
-                assert_eq!(field.rgba[i + 1], 0x3800);
-            }
-        }
-        // Past kube's bezel only the easing tail remains, fading to nothing by 40 DIP.
-        let tail = texel_offset(&field, 20, 150).0;
-        assert!(tail > 0.1 && tail < 3.0, "tail at 20 DIP moves {tail} px");
-        assert!(texel_offset(&field, 38, 150).0.abs() < 0.05);
+        assert!(texel_offset(&field, 200, 150).0.abs() < 0.1);
         for y in 0..300 {
             for x in 0..400 {
                 let a = texel_offset(&field, x, y);
                 let b = texel_offset(&field, 399 - x, 299 - y);
-                assert!((a.0 + b.0).abs() < 0.05 && (a.1 + b.1).abs() < 0.05);
+                assert!((a.0 + b.0).abs() < 0.08 && (a.1 + b.1).abs() < 0.08);
             }
         }
-        assert!(
-            field
-                .rgba
-                .iter()
-                .all(|&v| (0.0..=1.0).contains(&from_half(v)))
-        );
-        let high_dpi = displacement_field(1600, 1200, 4.0, 16.0);
-        assert_eq!(
-            field.rgba, high_dpi.rgba,
-            "DPI must scale rays, not change the surface"
-        );
+        let high_dpi = displacement_field(1600, 1200, 4.0, BEZEL_DIP);
+        assert_eq!(field.rgba, high_dpi.rgba);
         assert_eq!(high_dpi.scale_px, 2.0 * field.scale_px);
     }
 
     #[test]
-    fn magnification_eases_out_instead_of_ending_at_an_inner_frame() {
-        // Sample position along the middle row, in DIP from the left rim (scale 1).
-        let field = displacement_field(400, 300, 1.0, 16.0);
+    fn shoulder_joins_the_domelike_face_without_an_inner_contour() {
+        let field = displacement_field(400, 300, 1.0, BEZEL_DIP);
         let sample = |x: usize| x as f32 + 0.5 + texel_offset(&field, x, 150).0;
         let slope = |x: usize| sample(x + 1) - sample(x);
-        // kube's fold stays at the rim ...
-        assert!(
-            slope(0) < 0.0 && slope(2) < 0.0,
-            "the rim must keep its reflection"
-        );
-        // ... and past kube's recovery the zoom relaxes steadily, without a step where its
-        // bezel ends, reaching 1:1 only at the tail's end (half floats jitter by ~0.02).
-        let turn = (0..20).find(|&x| slope(x) > 0.0).unwrap();
-        assert!((5..=8).contains(&turn), "fold turns at {turn} DIP");
-        for x in 12..44 {
+        for x in 8..44 {
             assert!(
-                slope(x + 3) >= slope(x) - 0.03,
-                "zoom tightens again at {x} DIP"
+                slope(x) > 0.15,
+                "background folds inside the shoulder at {x}"
             );
             assert!(
-                (slope(x + 1) - slope(x)).abs() < 0.06,
-                "visible step at {x} DIP"
+                (slope(x + 1) - slope(x)).abs() < 0.18,
+                "hard inner edge at {x}"
             );
         }
-        assert!(
-            slope(16) < 0.95,
-            "the face must still be easing at the bezel end"
-        );
-        assert!((slope(45) - 1.0).abs() < 1e-3);
+        assert!((slope(40) - (1.0 - FACE_MAGNIFICATION)).abs() < 0.03);
     }
 
     #[test]
-    fn short_plates_end_the_tail_at_their_centre_and_corners_stay_smooth() {
-        // A rolled 36 DIP fence: both halves meet at the centre line without a seam.
-        let rolled = displacement_field(640, 72, 2.0, 16.0);
+    fn short_plates_and_corner_diagonals_have_no_displacement_seam() {
+        let rolled = displacement_field(640, 72, 2.0, BEZEL_DIP);
         for x in [40usize, 160, 280] {
-            for y in [17usize, 18] {
-                let (dx, dy) = texel_offset(&rolled, x, y);
-                assert!(
-                    dx.abs() < 0.05 && dy.abs() < 0.2,
-                    "centre moved {dx},{dy} at {x},{y}"
-                );
-            }
+            let upper = texel_offset(&rolled, x, 17);
+            let lower = texel_offset(&rolled, x, 18);
+            assert!((upper.0 - lower.0).abs() < 0.05);
+            assert!(upper.1.abs() < 0.2 && lower.1.abs() < 0.2);
+            assert!((upper.1 + lower.1).abs() < 0.05);
         }
-        // The tail passes the 16 DIP corner: neighbouring texels across the diagonal must
-        // move alike instead of flipping between horizontal and vertical.
-        let square = displacement_field(300, 300, 1.0, 16.0);
-        for d in 18..36 {
+        let square = displacement_field(300, 300, 1.0, BEZEL_DIP);
+        for d in 12..40 {
             let a = texel_offset(&square, d, d + 1);
             let b = texel_offset(&square, d + 1, d);
             assert!((a.0 - b.1).abs() < 0.05 && (a.1 - b.0).abs() < 0.05);
             let c = texel_offset(&square, d, d);
             assert!(
-                (a.0 - c.0).abs() < 0.3 && (a.1 - c.1).abs() < 0.3,
+                (a.0 - c.0).abs() < 0.7 && (a.1 - c.1).abs() < 0.7,
                 "crease at {d}"
             );
         }
     }
 
     #[test]
-    fn rim_light_is_a_thin_ring_lit_across_one_diagonal() {
+    fn shoulder_reflection_is_broad_directional_and_scales_in_dips() {
         for scale in [1.0, 1.25, 1.5, 2.0] {
             let (w, h) = ((320.0 * scale) as u32, (120.0 * scale) as u32);
-            let field = displacement_field(w, h, scale, 16.0);
-            let alpha = |x: u32, y: u32| field.rim[(y * w + x) as usize];
-            let mid = h / 2;
-            let peak = (1.0 * scale) as u32;
+            let field = displacement_field(w, h, scale, BEZEL_DIP);
+            let x = w / 2;
+            let alpha = |y: u32| field.rim[(y * w + x) as usize];
+            let shade = |y: u32| field.shade[(y * w + x) as usize];
+            let shoulder = (8.0 * scale) as u32;
             assert!(
-                alpha(peak, mid) > 40,
-                "{scale}: left ring {}",
-                alpha(peak, mid)
+                alpha(shoulder) > 150,
+                "broad top highlight missing at {scale}"
             );
-            assert!(
-                alpha(w / 2, peak) > alpha(peak, mid),
-                "top faces the 60 degree light more than the side"
-            );
-            for x in (3.0 * scale).ceil() as u32..w - (3.0 * scale).ceil() as u32 {
-                assert_eq!(alpha(x, mid), 0, "{scale}: ring leaked inward at {x}");
-            }
-            // The ring crosses each corner's diagonal ~5.4 DIP in from both edges.
-            let near = |x: f32, y: f32| {
-                let span = (2.0 * scale) as i32;
-                let (x, y) = ((x * scale) as i32, (y * scale) as i32);
-                (-span..=span)
-                    .flat_map(|dy| (-span..=span).map(move |dx| (x + dx, y + dy)))
-                    .map(|(x, y)| alpha(x as u32, y as u32))
-                    .max()
-                    .unwrap()
-            };
-            let (left, right) = (near(5.4, 5.4), near(320.0 - 5.4, 5.4));
-            assert!(
-                right > 150 && left < right / 3,
-                "{scale}: top-right faces the light ({right}), top-left does not ({left})"
-            );
+            assert!(alpha((16.0 * scale) as u32) > 80);
+            assert!(alpha(shoulder) > alpha(h - 1 - shoulder) * 3);
+            assert!(shade(h - 1 - shoulder) > 150);
+            assert_eq!(alpha(h / 2), 0);
+            assert_eq!(shade(h / 2), 0);
         }
     }
 
     #[test]
-    fn short_and_sharp_plates_scale_the_bezel_without_nan() {
+    fn short_and_sharp_plates_scale_the_whole_surface_without_nan() {
         for (w, h, scale, radius) in [
-            (640, 64, 2.0, 16.0),
-            (300, 40, 1.25, 16.0),
+            (640, 64, 2.0, BEZEL_DIP),
+            (300, 40, 1.25, BEZEL_DIP),
             (120, 28, 1.0, 12.0),
             (200, 200, 1.5, 0.0),
-            (2, 2, 1.0, 16.0),
+            (2, 2, 1.0, BEZEL_DIP),
         ] {
             let field = displacement_field(w, h, scale, radius);
             assert!(field.scale_px.is_finite() && field.scale_px >= 1.0);
@@ -891,6 +806,7 @@ mod tests {
                     .all(|&v| (0.0..=1.0).contains(&from_half(v)))
             );
             assert_eq!(field.rim.len(), (w * h) as usize);
+            assert_eq!(field.shade.len(), (w * h) as usize);
         }
         let sharp = displacement_field(200, 200, 1.5, 0.0);
         assert!(

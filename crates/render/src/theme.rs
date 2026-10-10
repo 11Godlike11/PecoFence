@@ -167,11 +167,10 @@ impl Theme {
 
     /// Liquid Glass-inspired chrome. Keep mode and accent independent of the material.
     /// The composition root clips to this radius, including content and height animations.
-    /// It matches the GPU bezel width (`liquid_glass::BEZEL_DIP`): kube's refraction
-    /// profile needs a corner at least as round as its bezel.
+    /// It matches the wider elliptical shoulder of the GPU optical surface.
     pub const fn with_liquid_glass(mut self) -> Self {
         self.liquid_glass = true;
-        self.corner_radius = 16.0;
+        self.corner_radius = crate::liquid_glass::BEZEL_DIP;
         self.glass_rim_top = ColorF::from_rgba8(0xFF, 0xFF, 0xFF, 0xCD);
         match self.mode {
             ThemeMode::Dark => {
