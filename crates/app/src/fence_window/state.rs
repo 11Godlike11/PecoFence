@@ -8,6 +8,9 @@ pub struct FenceViewState {
     pub title: String,
     pub rolled_up: bool,
     pub is_inbox: bool,
+    pub desktop: bool,
+    pub desktop_cells: Vec<CellRect>,
+    pub desktop_regions: Vec<RECT>,
     /// Expanded window height in physical pixels (restored when un-rolling).
     pub expanded_h_px: i32,
     pub icon_size: u32,
@@ -363,6 +366,9 @@ impl FenceViewState {
     }
 
     pub(super) fn title_h_px(&self) -> i32 {
+        if self.desktop {
+            return 0;
+        }
         (self.theme.title_height * self.scale()).round() as i32
     }
 

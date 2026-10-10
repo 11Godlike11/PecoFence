@@ -82,6 +82,7 @@ try {
   Copy-Item -LiteralPath "docs/UPGRADING.md" -Destination (Join-Path $common "UPGRADING.md")
   Copy-Item -LiteralPath "docs/WALLPAPER_ENGINE.md" -Destination $common
   Copy-Item -LiteralPath "docs/GLASS_RENDERING.md" -Destination $common
+  Copy-Item -LiteralPath "docs/DESKTOP_CONTAINERS.md" -Destination $common
   Copy-Item -LiteralPath "skills/pecofence-cli/SKILL.md" -Destination (Join-Path $common "SKILL.md")
   & $Python scripts/write-license-notices.py (Join-Path $common "THIRD-PARTY-LICENSES.txt")
   if ($LASTEXITCODE -ne 0) { throw "License notice generation failed" }

@@ -87,6 +87,9 @@ impl FenceViewState {
 
     /// Is the client-pixel point on the portal "up" button?
     pub(super) fn up_button_at(&self, x_px: i32, y_px: i32) -> bool {
+        if self.desktop {
+            return false;
+        }
         if !self.deco.up_button || self.tabs.len() > 1 {
             return false;
         }
@@ -98,6 +101,9 @@ impl FenceViewState {
 
     /// Is the client-pixel point on the roll-up chevron button (right end of the title row)?
     pub(super) fn chevron_at(&self, x_px: i32, y_px: i32) -> bool {
+        if self.desktop {
+            return false;
+        }
         let scale = self.scale();
         let (w_px, _) = self.chrome_panel.size_px();
         let r = TitleDeco::chevron_box(w_px as f32 / scale, self.theme.title_height);
@@ -146,6 +152,13 @@ impl FenceViewState {
     /// The item layout at `width_dip`. With 「调整大小时按整行整列对齐」 its rows fill the
     /// viewport's height, so any fence height shows whole icons.
     pub(super) fn layout(&self, width_dip: f32) -> ItemLayout {
+        if self.desktop {
+            return ItemLayout::Grid(Grid::free(
+                self.grid_metrics(),
+                width_dip,
+                self.desktop_cells.clone(),
+            ));
+        }
         let layout = self.natural_layout(width_dip);
         if !self.behavior.size_to_cells.get() {
             return layout;

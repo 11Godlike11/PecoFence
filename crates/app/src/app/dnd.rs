@@ -177,6 +177,7 @@ impl App {
                 path,
                 since: Instant::now(),
                 rename: false,
+                desktop_position: None,
             });
         }
         let report = self.sync_desktop_if_available("shell drop");
@@ -213,6 +214,7 @@ impl App {
                     path,
                     since: Instant::now(),
                     rename: false,
+                    desktop_position: None,
                 });
             }
             Err(e) => {

@@ -100,6 +100,10 @@ pub(super) fn show_shadow(shadow: HWND, fence: HWND) {
 
 impl FenceViewState {
     pub(super) fn update_shadow(&mut self) {
+        if self.desktop {
+            self.shadow.hide();
+            return;
+        }
         if pecofence_core::brand::var_os("PECOFENCE_NO_SHADOW").is_some() {
             self.shadow.hide();
             return;

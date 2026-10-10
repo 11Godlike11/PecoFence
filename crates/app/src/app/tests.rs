@@ -415,6 +415,7 @@ mod ipc {
             anchor: pecofence_core::Anchor::LeftTop,
         };
         pecofence_core::Layout {
+            desktop_items: Default::default(),
             shown: 0,
             fingerprint: devices
                 .iter()

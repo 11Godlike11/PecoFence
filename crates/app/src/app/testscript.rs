@@ -433,8 +433,10 @@ impl App {
                             .fence(id)
                             .and_then(|f| f.items.first().map(|r| r.item_id))
                     {
-                        self.queue
-                            .push(Command::MoveItemsToInbox { items: vec![item] });
+                        self.queue.push(Command::MoveItemsToDesktop {
+                            position: None,
+                            items: vec![item],
+                        });
                     }
                 }
                 ["move", title, into] => {
@@ -655,6 +657,10 @@ impl App {
         let band = self.marquee_band_shown().map(rect);
         tracing::info!(target: "pecofence::test", "[{tag}] selection={selected:?} ringed={ringed:?} band={band:?}");
         let peek = self.peek.is_some();
+        for (monitor, w) in &self.desktop_windows {
+            tracing::info!(target: "pecofence::test", "[{tag}] desktop monitor={monitor:?} state={}", w.debug_state());
+        }
+        tracing::info!(target: "pecofence::test", "[{tag}] loose-items={}", self.state.loose_items().len());
         let rename = crate::rename::active_target().is_some();
         tracing::info!(target: "pecofence::test", "[{tag}] fences={} dying={} peek={peek} rename={rename} hide_setting={} icons_hidden={}",
             self.fences.len(), self.dying.len(), self.state.config.settings.hide_real_icons,

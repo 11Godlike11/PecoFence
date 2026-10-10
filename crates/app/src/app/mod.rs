@@ -56,6 +56,7 @@ mod group;
 mod ipc;
 mod items;
 mod live_wallpaper;
+mod loose_desktop;
 mod menus;
 mod motion;
 mod peek;
@@ -153,6 +154,7 @@ struct PendingRoute {
     since: Instant,
     /// Open the inline rename popup once it lands ("新建").
     rename: bool,
+    desktop_position: Option<(i32, i32)>,
 }
 
 pub struct Args {
@@ -176,6 +178,9 @@ pub struct App {
     state: AppState,
     ctx: Rc<FenceContext>,
     fences: HashMap<FenceId, FenceWindow>,
+    desktop_windows: HashMap<String, FenceWindow>,
+    desktop_descriptor: pecofence_core::Fence,
+    desktop_marquee_base: HashMap<FenceId, Vec<ItemId>>,
     /// Windows of deleted / merged fences, kept alive while they fade out; dropped (destroyed)
     /// on `Command::FadeOutDone`.
     dying: Vec<FenceWindow>,
@@ -900,10 +905,28 @@ impl App {
             pecofence_platform::process::is_packaged(),
         );
 
+        let mut desktop_descriptor = pecofence_core::Fence::new(
+            "桌面散放",
+            FenceKind::Virtual,
+            pecofence_core::NormGeometry {
+                monitor: String::new(),
+                x: 0.0,
+                y: 0.0,
+                w: 1.0,
+                h: 1.0,
+                work_w: 1.0,
+                work_h: 1.0,
+                anchor: pecofence_core::Anchor::LeftTop,
+            },
+        );
+        desktop_descriptor.id = uuid::Uuid::nil();
         let mut app = App {
             state,
             ctx,
             fences: HashMap::new(),
+            desktop_windows: HashMap::new(),
+            desktop_descriptor,
+            desktop_marquee_base: HashMap::new(),
             anchor: anchor_cell,
             control,
             queue,
@@ -1042,6 +1065,7 @@ impl App {
         app.sync_fence_windows();
         // Fences never stay on top of each other: pull apart any overlap the layout brings.
         app.settle_unplaced(true);
+        app.refresh_desktop();
         if let Some(folder) = args.portal.as_deref() {
             let (cx, cy) = app
                 .state
@@ -1054,7 +1078,7 @@ impl App {
         if let Some(a) = app.anchor.borrow_mut().as_mut() {
             a.reanchor("startup");
         }
-        for f in app.fences.values() {
+        for f in app.fences.values().chain(app.desktop_windows.values()) {
             f.show(false);
         }
         if let Some(a) = app.anchor.borrow_mut().as_mut() {
@@ -1169,7 +1193,7 @@ impl App {
         }
         // A DPI that settled late re-lays the window out; its rectangle stays (the rows and
         // columns share the rest, so it still shows whole icons).
-        for window in self.fences.values() {
+        for window in self.fences.values().chain(self.desktop_windows.values()) {
             window.check_dpi();
         }
         // Startup hide that kept failing: converge to the same end state as apply_settings
@@ -1337,25 +1361,8 @@ impl App {
             } => self.detach_tab(tab, x, y, from_drag),
             Command::CancelDetach { change } => self.cancel_tab_detach(*change),
             Command::ReorderTab { host, tab, to } => self.reorder_tab(host, tab, to),
-            Command::MoveItemsToInbox { items } => {
-                // Dropped on the bare desktop: back to the inbox, then straight through the
-                // rules — the same routing a new desktop item gets, now instead of whenever the
-                // watcher next reconciles (which used to leave the icon in the rolled-up inbox
-                // for a second or two).
-                if let Some(inbox) = self.state.inbox_id() {
-                    self.move_items(&items, inbox);
-                    let entries = shell::enumerate_desktop();
-                    let touched = self.state.apply_rules_to(&items, &entries);
-                    tracing::debug!(
-                        items = items.len(),
-                        refiled = ?touched,
-                        "dropped on the desktop: inbox, then rules"
-                    );
-                    for id in touched {
-                        self.refresh_fence(id);
-                    }
-                    self.schedule_save();
-                }
+            Command::MoveItemsToDesktop { items, position } => {
+                self.release_to_desktop(&items, position);
             }
             Command::ExternalDrop { paths, to, mode } if self.state.portal_path(to).is_some() => {
                 self.transfer_files_into_portal(paths, to, mode);
@@ -1375,6 +1382,7 @@ impl App {
                             path,
                             since: Instant::now(),
                             rename: false,
+                            desktop_position: None,
                         });
                     }
                     let report = self.sync_desktop_if_available("shortcut drop");
@@ -1424,6 +1432,7 @@ impl App {
                                 path: path.clone(),
                                 since: Instant::now(),
                                 rename: false,
+                                desktop_position: None,
                             });
                         }
                         let owner = self.window_for(to).map(|w| w.hwnd());
@@ -1580,6 +1589,7 @@ impl App {
         self.end_peek_now();
         self.state.save_if_dirty();
         self.fences.clear();
+        self.desktop_windows.clear();
         self.dying.clear();
         if let Some(a) = self.anchor.borrow_mut().as_mut() {
             a.restore_desktop_icons();

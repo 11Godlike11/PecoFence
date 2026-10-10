@@ -241,7 +241,14 @@ pub(super) fn on_mousemove(
                 });
                 // Nested message loop until the button is released.
                 crate::peek::set_drag_click_through(true);
-                let effect = dragdrop::do_drag_drop(hwnd, &obj, dragdrop::ALL_EFFECTS);
+                let effect = dragdrop::do_drag_drop(hwnd, &obj, dragdrop::ALL_EFFECTS, || {
+                    let pt = window::cursor_pos();
+                    let target = desktop::root_ancestor(desktop::window_from_point(pt.x, pt.y));
+                    matches!(
+                        desktop::class_name(target).as_str(),
+                        "Progman" | "WorkerW" | "SHELLDLL_DefView" | "SysListView32"
+                    )
+                });
                 drag_returned = Some(Instant::now());
                 INTERNAL_DRAG.with(|s| *s.borrow_mut() = None);
                 Some(effect)
@@ -286,16 +293,18 @@ pub(super) fn on_mousemove(
             // Esc / right button: Explorer cancels outright, so do we.
             Some(r) if !r.dropped => {}
             // Bare desktop (its hidden ListView accepts nothing, so the
-            // effect is None): Explorer's same-folder drop leaves desktop
-            // items alone, so keep "back to the inbox". A Ctrl / Alt drop
-            // means duplicate, not relocate. A portal's files really moved
-            // there; the desktop watcher files them.
+            // effect is None): release virtual membership at the pointer. A
+            // portal rejected by the hidden shell view uses our asynchronous
+            // file move; a shell move that succeeded is reconciled below.
             Some(r)
                 if on_desktop
-                    && !from_portal
+                    && (!from_portal || r.effect == DropEffect::None)
                     && matches!(r.effect, DropEffect::None | DropEffect::Move) =>
             {
-                queue.push(Command::MoveItemsToInbox { items: ids });
+                queue.push(Command::MoveItemsToDesktop {
+                    items: ids,
+                    position: Some((pt.x, pt.y)),
+                });
             }
             Some(r)
                 if matches!(r.effect, DropEffect::Move | DropEffect::Copy)

@@ -702,7 +702,7 @@ impl App {
         };
         self.wallpaper_sig = Some(signature);
         *self.ctx.backdrops.borrow_mut() = backdrops.clone();
-        for window in self.fences.values() {
+        for window in self.fences.values().chain(self.desktop_windows.values()) {
             window.set_backdrops(backdrops.clone());
         }
         tracing::info!(
@@ -839,7 +839,7 @@ impl App {
             }
             self.push_settings_state();
         }
-        for w in self.fences.values() {
+        for w in self.fences.values().chain(self.desktop_windows.values()) {
             w.set_theme(theme, backdrops.clone(), shadow);
         }
         // Leaving Liquid Glass stops the draws that would otherwise release old textures.
@@ -852,7 +852,7 @@ impl App {
         let variant = icon_variant_for(&self.state.config.settings.icons);
         if self.ctx.icons.borrow_mut().set_variant(variant) {
             self.ctx.bitmaps.borrow_mut().clear_keyed();
-            for w in self.fences.values() {
+            for w in self.fences.values().chain(self.desktop_windows.values()) {
                 w.drop_icons();
             }
         }

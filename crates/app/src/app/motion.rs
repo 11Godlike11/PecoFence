@@ -22,7 +22,12 @@ impl App {
     /// A failure (the driver is still resetting) is retried on a timer: a window that lost its
     /// device reports it only once, so nothing else would ever try again.
     pub(super) fn recover_device(&mut self) {
-        if !self.fences.values().any(|w| w.device_lost()) {
+        if !self
+            .fences
+            .values()
+            .chain(self.desktop_windows.values())
+            .any(|w| w.device_lost())
+        {
             self.device_retry_ms = DEVICE_RETRY_FIRST_MS;
             return;
         }
@@ -32,10 +37,15 @@ impl App {
             return;
         }
         self.ctx.bitmaps.borrow_mut().clear();
-        for w in self.fences.values() {
+        for w in self.fences.values().chain(self.desktop_windows.values()) {
             w.recreate_surfaces(&self.ctx.stack);
         }
-        if self.fences.values().any(|w| w.device_lost()) {
+        if self
+            .fences
+            .values()
+            .chain(self.desktop_windows.values())
+            .any(|w| w.device_lost())
+        {
             // A window got no new surfaces (logged there): rebuild everything again later.
             self.schedule_device_retry();
         } else {
@@ -106,7 +116,7 @@ impl App {
             (icons.drain_results(), icons.flush_retries())
         };
         if n > 0 {
-            for w in self.fences.values() {
+            for w in self.fences.values().chain(self.desktop_windows.values()) {
                 w.redraw_if_pending_icons();
             }
         }
@@ -136,7 +146,12 @@ impl App {
         let mut more = false;
         // Dying windows are ticked too: their shadow fades on the frame clock until the exit
         // fade's completion drops them.
-        for w in self.fences.values().chain(self.dying.iter()) {
+        for w in self
+            .fences
+            .values()
+            .chain(self.desktop_windows.values())
+            .chain(self.dying.iter())
+        {
             more |= w.on_frame(now);
         }
         self.reflow_pushed();
@@ -181,7 +196,11 @@ impl App {
             }
             self.frame_prev = None;
         }
-        let fast = self.fences.values().any(FenceWindow::wants_fast_frames);
+        let fast = self
+            .fences
+            .values()
+            .chain(self.desktop_windows.values())
+            .any(FenceWindow::wants_fast_frames);
         self.ctx.frames.finish_frame(more, fast);
     }
 }

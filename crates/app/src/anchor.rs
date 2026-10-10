@@ -195,6 +195,7 @@ pub struct DesktopAnchor {
     pub on_marquee: Option<Box<dyn Fn(MarqueeEvent)>>,
     /// Fence windows (as raw handles) that stay visible during quick hide.
     quick_hide_excluded: std::collections::HashSet<isize>,
+    desktop_surfaces: std::collections::HashSet<isize>,
     /// Peek in progress: fences are topmost and anchoring is suspended.
     peeking: bool,
     /// Fences (hidden by quick hide) that Peek showed and must hide again afterwards.
@@ -294,6 +295,7 @@ impl DesktopAnchor {
             quit_requested: false,
             on_marquee: None,
             quick_hide_excluded: std::collections::HashSet::new(),
+            desktop_surfaces: std::collections::HashSet::new(),
             peeking: false,
             peek_shown: Vec::new(),
             on_peek_interrupted: None,
@@ -314,11 +316,23 @@ impl DesktopAnchor {
 
     pub fn unregister_fence(&mut self, hwnd: HWND) {
         self.fences.retain(|(h, _)| *h != hwnd);
+        self.desktop_surfaces.remove(&(hwnd.0 as isize));
+        self.quick_hide_excluded.remove(&(hwnd.0 as isize));
+    }
+
+    pub fn register_desktop_surface(&mut self, hwnd: HWND) {
+        self.fences.retain(|(h, _)| *h != hwnd);
+        self.fences.insert(0, (hwnd, None));
+        self.desktop_surfaces.insert(hwnd.0 as isize);
+        self.set_quick_hide_excluded(hwnd, true);
     }
 
     /// Puts `hwnd` above the other fences (clicked / newly created), keeping all of them just
     /// above the icon host.
     pub fn raise_fence(&mut self, hwnd: HWND) {
+        if self.desktop_surfaces.contains(&(hwnd.0 as isize)) {
+            return;
+        }
         let Some(pos) = self.fences.iter().position(|(h, _)| *h == hwnd) else {
             return;
         };
@@ -358,6 +372,9 @@ impl DesktopAnchor {
     fn place_peek_band(&mut self) {
         self.with_anchoring(|s| {
             for (f, shadow) in s.fences.clone() {
+                if s.desktop_surfaces.contains(&(f.0 as isize)) {
+                    continue;
+                }
                 for h in std::iter::once(f).chain(shadow) {
                     // Fences created during the peek (resync_windows) are not topmost yet.
                     let _ = desktop::set_topmost(h, true);
@@ -551,6 +568,9 @@ impl DesktopAnchor {
                     let _ = desktop::set_topmost(*w, true);
                 }
                 for (f, shadow) in s.fences.clone() {
+                    if s.desktop_surfaces.contains(&(f.0 as isize)) {
+                        continue;
+                    }
                     if !desktop::is_visible(f) {
                         // Quick-hidden: fade it in for the peek (its shadow follows on its own).
                         set_fence_visible(f, shadow, true);

@@ -94,6 +94,19 @@ impl FenceViewState {
 
     /// Adapt content to the clear plate instead of darkening the whole wallpaper.
     pub(super) fn material_foreground(&self) -> Theme {
+        if self.desktop {
+            return Theme {
+                liquid_glass: false,
+                text_halo: false,
+                text_primary: ColorF {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 1.0,
+                },
+                ..self.theme
+            };
+        }
         if self.theme.liquid_glass && self.gpu_glass.borrow().failed() {
             return self.theme;
         }
@@ -313,6 +326,10 @@ impl FenceViewState {
 
     /// Draws the chrome (backdrop, tabs or title, rim, chevron).
     pub(super) fn draw_chrome_panel(&mut self) -> Result<()> {
+        if self.desktop {
+            self.chrome_panel.visual.set_visible(false);
+            return Ok(());
+        }
         let now = Instant::now();
         let state = self.title_state(now);
         // DIP height the crop covers (taller than the surface mid height animation).
@@ -469,6 +486,9 @@ impl FenceViewState {
     /// Also accepts a pending pure move, so the GPU surface is prepared before Windows
     /// changes the HWND position. Only a tiny contrast sample is computed on the CPU.
     pub(super) fn update_backdrop_at(&mut self, r: RECT) -> bool {
+        if self.desktop {
+            return false;
+        }
         let w = r.right - r.left;
         let mut h = r.bottom - r.top;
         // Liquid Glass's displacement field is rebuilt by the GPU renderer only on
@@ -552,6 +572,10 @@ impl FenceViewState {
     }
 
     pub(super) fn resize_chrome_viewport(&mut self, w: i32, h: i32) -> Result<()> {
+        if self.desktop {
+            self.chrome_panel.resize(1, 1)?;
+            return Ok(());
+        }
         if self.theme.liquid_glass {
             self.chrome_panel.resize_viewport(w, h)?;
         } else {
@@ -564,6 +588,9 @@ impl FenceViewState {
     /// starts at the plate top: a title row folded away by title on hover is cut off too (a
     /// Fluent window is otherwise rounded by DWM alone).
     pub(super) fn update_shape_clip(&self, w: i32, h: i32) -> Result<()> {
+        if self.desktop {
+            return self.motion.clear_clip(&self.root);
+        }
         let inset = self.plate_inset_px.clamp(0, (h - 1).max(0));
         if self.theme.liquid_glass {
             self.motion.clip_glass_at(
@@ -853,7 +880,11 @@ impl FenceViewState {
             icon_top: grid.metrics.icon_top,
             label_gap: grid.metrics.label_gap,
             scrollbar,
-            empty_text: Some(self.empty_text()),
+            empty_text: if self.desktop {
+                None
+            } else {
+                Some(self.empty_text())
+            },
             drop_highlight: self.drop_wash.value_at(now),
             marquee: self.marquee_rect_dip(),
             insert_caret: self.insert_caret_dip(0.0),
@@ -874,8 +905,40 @@ impl FenceViewState {
                 &content,
             )
         })?;
+        let full_lines = full.map(|(_, lines)| lines);
         self.note_draw_result(ok);
         self.note_content_fades(now);
+        if self.desktop {
+            let regions: Vec<_> = self
+                .desktop_cells
+                .iter()
+                .enumerate()
+                .map(|(i, cell)| {
+                    let expanded = if shortened == Some(i) {
+                        full_lines.map_or(cell.h, |lines| {
+                            cell.h.max(
+                                grid.metrics.icon_top
+                                    + grid.metrics.icon
+                                    + grid.metrics.label_gap
+                                    + lines as f32 * grid.metrics.line_h
+                                    + 4.0,
+                            )
+                        })
+                    } else {
+                        cell.h
+                    };
+                    RECT {
+                        left: (cell.x * scale).floor() as i32,
+                        top: (cell.y * scale).floor() as i32,
+                        right: ((cell.x + cell.w) * scale).ceil() as i32,
+                        bottom: ((cell.y + expanded) * scale).ceil() as i32,
+                    }
+                })
+                .collect();
+            if self.desktop_regions != regions && window::set_hit_regions(self.hwnd, &regions) {
+                self.desktop_regions = regions;
+            }
+        }
         if ok {
             self.content_dirty = false;
             self.content_ink = Some(theme.text_primary);

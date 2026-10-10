@@ -664,26 +664,128 @@ const DRAGDROP_S_DROP: i32 = 0x0004_0100;
 /// **Runs a nested message loop** until the button is released: the caller must hold no
 /// `RefCell` borrow and must have released mouse capture. Distinguishes a cancelled drag from
 /// a drop nobody accepted (the generated binding folds both into `Ok(0)`).
-pub fn do_drag_drop(hwnd: HWND, data: &IDataObject, allowed: u32) -> DragOutcome {
+pub fn do_drag_drop(
+    hwnd: HWND,
+    data: &IDataObject,
+    allowed: u32,
+    local_drop: impl Fn() -> bool + 'static,
+) -> DragOutcome {
     windows_core::link!("shell32.dll" "system" fn SHDoDragDrop(hwnd: HWND, pdata: *mut core::ffi::c_void, pdsrc: *mut core::ffi::c_void, dweffect: u32, pdweffect: *mut u32) -> windows_core::HRESULT);
     let mut effect: u32 = 0;
-    // SAFETY: valid HWND and interface; a null IDropSource asks the shell for its default one.
-    let hr = unsafe {
-        SHDoDragDrop(
-            hwnd,
-            data.as_raw(),
-            core::ptr::null_mut(),
-            allowed,
-            &mut effect,
-        )
-    };
+    let claimed = std::rc::Rc::new(std::cell::Cell::new(false));
+    let object = Box::new(LocalDropSource {
+        vtbl: &SOURCE_VTBL,
+        refs: AtomicU32::new(1),
+        local_drop: Box::new(local_drop),
+        claimed: claimed.clone(),
+    });
+    // SAFETY: the first field is an ABI-compatible IDropSource vtable. COM owns the box.
+    let source = unsafe { IDropSource::from_raw(Box::into_raw(object).cast()) };
+    // SAFETY: valid HWND and interfaces, held alive throughout the nested OLE loop.
+    let hr = unsafe { SHDoDragDrop(hwnd, data.as_raw(), source.as_raw(), allowed, &mut effect) };
     if hr.is_err() {
         tracing::warn!(error = %windows_core::Error::from_hresult(hr), "SHDoDragDrop failed");
     }
     DragOutcome {
-        dropped: hr.0 == DRAGDROP_S_DROP,
+        dropped: hr.0 == DRAGDROP_S_DROP || claimed.get(),
         effect: DropEffect::from_raw(effect),
     }
+}
+
+// Cancel the shell operation before it receives a bare-desktop drop. A virtual container's
+// file is already on that desktop; asking Explorer to move it there produces a same-file
+// dialog. Other targets still receive the original shell data object and normal effects.
+#[repr(C)]
+struct SourceVtable {
+    base: windows_core::IUnknown_Vtbl,
+    query_continue: unsafe extern "system" fn(*mut core::ffi::c_void, i32, u32) -> HRESULT,
+    feedback: unsafe extern "system" fn(*mut core::ffi::c_void, u32) -> HRESULT,
+}
+
+#[repr(C)]
+struct LocalDropSource {
+    vtbl: *const SourceVtable,
+    refs: AtomicU32,
+    local_drop: Box<dyn Fn() -> bool>,
+    claimed: std::rc::Rc<std::cell::Cell<bool>>,
+}
+
+static SOURCE_VTBL: SourceVtable = SourceVtable {
+    base: windows_core::IUnknown_Vtbl {
+        QueryInterface: source_query_interface,
+        AddRef: source_add_ref,
+        Release: source_release,
+    },
+    query_continue: source_continue,
+    feedback: source_feedback,
+};
+
+unsafe extern "system" fn source_query_interface(
+    this: *mut core::ffi::c_void,
+    iid: *const GUID,
+    out: *mut *mut core::ffi::c_void,
+) -> HRESULT {
+    // SAFETY: COM contract provides a live object and readable IID.
+    unsafe {
+        if out.is_null() {
+            return E_POINTER;
+        }
+        *out = core::ptr::null_mut();
+        if *iid == IDropSource::IID || *iid == windows_core::IUnknown::IID {
+            source_add_ref(this);
+            *out = this;
+            S_OK
+        } else {
+            E_NOINTERFACE
+        }
+    }
+}
+
+unsafe extern "system" fn source_add_ref(this: *mut core::ffi::c_void) -> u32 {
+    // SAFETY: COM contract provides a live LocalDropSource.
+    unsafe {
+        (*(this as *mut LocalDropSource))
+            .refs
+            .fetch_add(1, Ordering::AcqRel)
+            + 1
+    }
+}
+
+unsafe extern "system" fn source_release(this: *mut core::ffi::c_void) -> u32 {
+    // SAFETY: COM reference count owns this box; free it exactly once at zero.
+    unsafe {
+        let obj = this as *mut LocalDropSource;
+        let left = (*obj).refs.fetch_sub(1, Ordering::AcqRel) - 1;
+        if left == 0 {
+            drop(Box::from_raw(obj));
+        }
+        left
+    }
+}
+
+unsafe extern "system" fn source_continue(
+    this: *mut core::ffi::c_void,
+    escape: i32,
+    keys: u32,
+) -> HRESULT {
+    if escape != 0 || keys & MK_RBUTTON != 0 {
+        return HRESULT(0x0004_0101);
+    }
+    if keys & MK_LBUTTON != 0 {
+        return S_OK;
+    }
+    // SAFETY: OLE calls this on the source's STA while its reference is alive.
+    let source = unsafe { &*(this as *const LocalDropSource) };
+    if (source.local_drop)() {
+        source.claimed.set(true);
+        HRESULT(0x0004_0101)
+    } else {
+        HRESULT(DRAGDROP_S_DROP)
+    }
+}
+
+unsafe extern "system" fn source_feedback(_: *mut core::ffi::c_void, _: u32) -> HRESULT {
+    HRESULT(0x0004_0102) // DRAGDROP_S_USEDEFAULTCURSORS
 }
 
 /// Does the data object carry a file list (`CF_HDROP`)?
@@ -981,6 +1083,35 @@ impl DropTargetHelper {
 #[cfg(test)]
 mod effect_tests {
     use super::*;
+
+    #[test]
+    fn local_desktop_drop_preempts_shell_but_escape_and_other_targets_do_not() {
+        let claimed = std::rc::Rc::new(std::cell::Cell::new(false));
+        let target = std::rc::Rc::new(std::cell::Cell::new(true));
+        let target_copy = target.clone();
+        let source = Box::new(LocalDropSource {
+            vtbl: &SOURCE_VTBL,
+            refs: AtomicU32::new(1),
+            local_drop: Box::new(move || target_copy.get()),
+            claimed: claimed.clone(),
+        });
+        let ptr = Box::into_raw(source).cast();
+        // SAFETY: the boxed source is alive until its one COM reference is released below.
+        unsafe {
+            assert_eq!(source_continue(ptr, 0, MK_LBUTTON), S_OK);
+            assert_eq!(source_continue(ptr, 1, 0).0, 0x0004_0101);
+            assert!(!claimed.get());
+            assert_eq!(source_continue(ptr, 0, MK_RBUTTON).0, 0x0004_0101);
+            assert!(!claimed.get());
+            target.set(false);
+            assert_eq!(source_continue(ptr, 0, 0).0, DRAGDROP_S_DROP);
+            assert!(!claimed.get());
+            target.set(true);
+            assert_eq!(source_continue(ptr, 0, 0).0, 0x0004_0101);
+            assert!(claimed.get());
+            assert_eq!(source_release(ptr), 0);
+        }
+    }
 
     const MOVE: u32 = DROPEFFECT_MOVE as u32;
     const COPY: u32 = DROPEFFECT_COPY as u32;

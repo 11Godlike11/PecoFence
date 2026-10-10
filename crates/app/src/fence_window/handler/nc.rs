@@ -67,6 +67,9 @@ pub(super) fn on_nchittest(
     let Some(v) = guard.as_ref() else {
         return Some(msg::HTCLIENT);
     };
+    if v.desktop {
+        return Some(msg::HTCLIENT);
+    }
     let scale = v.scale();
     let border = (RESIZE_BORDER_DIP * scale).round() as i32;
     let title_h = v.title_h_px();
