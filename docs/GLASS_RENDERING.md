@@ -183,3 +183,16 @@ are checked, along with stable drawing-surface allocation and retained icon
 rasters. A desktop capture was inspected for complete icon rows and the expanded
 outline. This does not prove that the user's previously intermittent presentation
 glitch is resolved; acceptance still requires testing the installed build.
+
+After installing we.10 the user reported that the stuck expansion no longer
+occurred, but the motion frame rate was low on their 240 Hz display. In we.11,
+height changes and fence dragging request up to 120 Hz while live wallpaper
+capture retains its 60 Hz target. A frame remains outstanding until UI processing
+has finished: the worker cannot post further frame messages while one is queued
+or running. This bounds queue pressure instead of limiting every interaction to
+the slower material-update cadence. At rest the client clock returns to 60 Hz,
+and still disarms completely when no animation or live wallpaper needs it.
+The repeated native audit again passed all 81 state checks. Across 874 consecutive
+expanding height updates, the median interval was 8.85 ms, p95 12.41 ms and maximum
+17.04 ms. These are local HWND/frame-update timings, not a measurement of actual
+display presentation or a guarantee of sustained 120 fps.

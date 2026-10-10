@@ -477,7 +477,7 @@ impl FenceViewState {
         if self.tabs.len() > 1 && self.tab_drag.is_none() {
             self.sync_tab_slides(&prev, now);
         }
-        self.frames.request();
+        self.frames.request_fast();
     }
 
     /// Starts (or retargets) the auto-height settle towards `to_h`: 250 ms point-to-point,
@@ -512,7 +512,7 @@ impl FenceViewState {
             let _ = self.content_panel.resize(w, target_ch);
             let _ = self.redraw_content();
         }
-        self.frames.request();
+        self.frames.request_fast();
         true
     }
 }

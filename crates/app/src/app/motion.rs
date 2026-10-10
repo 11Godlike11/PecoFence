@@ -155,9 +155,7 @@ impl App {
         more |= self.tick_live_wallpaper();
         let spent = now.elapsed();
         self.frame_run.max_frame = self.frame_run.max_frame.max(spent);
-        if more {
-            self.ctx.frames.request();
-        } else {
+        if !more {
             // End of an animation run: one summary line, at info when it stuttered (a gap of
             // more than ~2 frames at 143 Hz / 1 frame at 60 Hz, or a frame that took longer
             // than a 143 Hz period to produce).
@@ -183,5 +181,7 @@ impl App {
             }
             self.frame_prev = None;
         }
+        let fast = self.fences.values().any(FenceWindow::wants_fast_frames);
+        self.ctx.frames.finish_frame(more, fast);
     }
 }

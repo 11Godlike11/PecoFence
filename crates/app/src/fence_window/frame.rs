@@ -149,6 +149,8 @@ impl FenceWindow {
             }
             self.with_view(|v| v.prepared_height_frame = None);
         }
+        tracing::trace!(target: "pecofence::height_motion", height = h, done,
+            rolled = ?rolled_at_end, "height frame");
         if !done {
             return true;
         }

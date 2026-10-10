@@ -1135,6 +1135,12 @@ impl FenceWindow {
             .is_some_and(|v| v.roll_target() || v.peeking)
     }
 
+    pub fn wants_fast_frames(&self) -> bool {
+        self.view.borrow().as_ref().is_some_and(|v| {
+            v.height_animating() || v.remote_drag.as_ref().is_some_and(|d| d.started)
+        })
+    }
+
     pub fn icon_size(&self) -> u32 {
         self.view
             .borrow()
