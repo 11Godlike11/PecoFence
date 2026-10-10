@@ -247,6 +247,7 @@ impl FenceWindow {
             roll_anim: None,
             roll_t: Tween::at(rolled_up as u8 as f32, Instant::now()),
             height_anim: None,
+            prepared_height_frame: None,
             vis_fade: None,
             vis_gen: 0,
             vis_deadline: None,
@@ -374,7 +375,7 @@ impl FenceWindow {
             },
         );
         format!(
-            "title={:?} opacity={:.2} scale={:.3} fade={fade} retired={} rolled={} rolling={} peeking={} items={} tabs={} selected={} focused={:?} shadow_visible={} shadow_alpha={} layout={:?} locked={} auto_height={} active={} scroll={:.1} client={:?} client_offset=({},{}) chrome={:?} glass={:?} wallpaper_uploads={} title_size={} tab_fonts={:?} tab_rects={:?} capture={} tab_drag={} window_drag={} detach_pending={} plate_inset={} plate_alpha={:.2} mouse_inside={} content_surface={:?} content_dirty={} content_draws={} glass_strength={:.3}",
+            "title={:?} opacity={:.2} scale={:.3} fade={fade} retired={} rolled={} rolling={} peeking={} items={} tabs={} selected={} focused={:?} shadow_visible={} shadow_alpha={} layout={:?} locked={} auto_height={} active={} scroll={:.1} client={:?} client_offset=({},{}) chrome={:?} glass={:?} wallpaper_uploads={} title_size={} tab_fonts={:?} tab_rects={:?} capture={} tab_drag={} window_drag={} detach_pending={} plate_inset={} plate_alpha={:.2} mouse_inside={} content_surface={:?} content_dirty={} content_draws={} glass_strength={:.3} chrome_backing={:?} content_opacity={:.3} roll_progress={:.3}",
             v.title,
             v.root.opacity(),
             v.root.scale().x,
@@ -418,6 +419,9 @@ impl FenceWindow {
             v.content_dirty,
             v.content_draws,
             v.gpu_glass.borrow().strength(),
+            v.chrome_panel.backing_state(),
+            v.content_panel.visual.opacity(),
+            v.roll_t.value_at(Instant::now()),
         )
     }
 
@@ -493,6 +497,9 @@ impl FenceWindow {
             "peek-open" => {
                 self.with_view(|v| v.title_hover = true);
                 window::send_message(hwnd, msg::WM_TIMER, TIMER_PEEK_OPEN, 0);
+            }
+            "stale-size" => {
+                window::send_message(hwnd, msg::WM_SIZE, 0, msg::make_lparam(x, y));
             }
             "pointer" => self.with_view(|v| {
                 if let Some(drag) = v.remote_drag.as_mut() {

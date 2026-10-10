@@ -6,7 +6,7 @@
 //! at 15.6 ms granularity and drifts against vsync; the compositor clock does not.
 //!
 //! One thread waits on the clock and calls `on_frame` (typically a `PostMessage`) once per
-//! vsync **while armed**. Consumers call [`FrameClock::request`] whenever they still have
+//! compositor tick (at most 60 Hz) **while armed**. Consumers call [`FrameClock::request`] whenever they still have
 //! work for the next frame; the clock disarms itself after each delivered frame, so an idle
 //! app costs nothing.
 
@@ -19,8 +19,9 @@ use std::time::{Duration, Instant};
 const COMPOSITOR_TIMEOUT_MS: u32 = 16;
 /// Some Windows builds occasionally return from the zero-handle wait without waiting at all.
 const IMMEDIATE_WAIT: Duration = Duration::from_millis(1);
-/// Pace that fast-return path without limiting a real high-refresh compositor signal.
-const FALLBACK_FRAME: Duration = Duration::from_micros(8_333);
+/// Bound client raster work to 60 Hz. A fast compositor return must not flood the
+/// UI queue and starve pointer input / WM_TIMER while several glass fences draw.
+const CLIENT_FRAME: Duration = Duration::from_nanos(16_666_667);
 
 struct Shared {
     armed: AtomicBool,
@@ -47,6 +48,7 @@ impl FrameClock {
         std::thread::Builder::new()
             .name("frame-clock".into())
             .spawn(move || {
+                let mut last_frame = None;
                 loop {
                     {
                         let mut guard = worker.wake.lock().unwrap();
@@ -65,14 +67,15 @@ impl FrameClock {
                     let waited =
                         unsafe { DCompositionWaitForCompositorClock(None, COMPOSITOR_TIMEOUT_MS) };
                     let waited_for = wait_started.elapsed();
-                    if waited == WAIT_FAILED || waited_for < IMMEDIATE_WAIT {
-                        // On unsupported or fast-returning implementations, prevent a busy loop
-                        // while still giving short client tweens several samples.
-                        if let Some(left) = FALLBACK_FRAME.checked_sub(waited_for) {
+                    let elapsed = last_frame.map_or(waited_for, |t: Instant| t.elapsed());
+                    if last_frame.is_some() || waited == WAIT_FAILED || waited_for < IMMEDIATE_WAIT
+                    {
+                        if let Some(left) = CLIENT_FRAME.checked_sub(elapsed) {
                             std::thread::sleep(left);
                         }
                     }
                     if worker.armed.swap(false, Ordering::AcqRel) {
+                        last_frame = Some(Instant::now());
                         on_frame();
                     }
                 }

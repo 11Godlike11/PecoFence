@@ -15,6 +15,7 @@ pub(super) fn roll_target_of(rolling_to: Option<bool>, rolled_up: bool) -> bool 
 pub(super) struct RollAnim {
     pub(super) height: Tween,
     pub(super) rolled_at_end: bool,
+    pub(super) content_alpha: Option<Tween>,
 }
 
 /// Whole-window fade (root visual opacity, plus a 0.97 scale for entrances / exits). The
@@ -407,6 +408,23 @@ impl FenceViewState {
         let velocity = self.roll_anim.as_ref().map(|a| a.height.velocity_at(now));
         let roll_from = self.roll_t.value_at(now);
         let roll_velocity = mid_roll.then(|| self.roll_t.velocity_at(now));
+        let alpha_from = self
+            .roll_anim
+            .as_ref()
+            .and_then(|a| a.content_alpha)
+            .map_or(if rolled { 1.0 } else { 0.0 }, |t| t.value_at(now));
+        if self.theme.liquid_glass {
+            // No per-frame CompositionDrawingSurface::Resize. Only the viewport and
+            // its continuous parent clip move; the brush keeps its original pixel scale.
+            let (w, _) = self.chrome_panel.size_px();
+            if let Err(error) = self.chrome_panel.reserve_height(w, cur_h.max(to_h)) {
+                tracing::error!(%error, "reserve roll surface failed");
+            }
+            let _ = self.motion.stop(&self.content_panel.visual, Prop::Opacity);
+            self.content_panel
+                .visual
+                .set_opacity(alpha_from.clamp(0.0, 1.0));
+        }
         if !rolled {
             self.rolled_up = false;
             // Rasterise the content once at its final size; the growing HWND reveals it.
@@ -435,17 +453,21 @@ impl FenceViewState {
         } else {
             (Duration::from_millis(320), Curve::PointToPoint)
         };
-        let _ = self.motion.fade_to(
-            &self.content_panel.visual,
-            if rolled { 0.0 } else { 1.0 },
-            dur,
-            curve,
-        );
+        let alpha_to = if rolled { 0.0 } else { 1.0 };
+        let content_alpha = if self.theme.liquid_glass {
+            Some(self.motion.tween(alpha_from, alpha_to, dur, curve, now))
+        } else {
+            let _ = self
+                .motion
+                .fade_to(&self.content_panel.visual, alpha_to, dur, curve);
+            None
+        };
         self.roll_anim = Some(RollAnim {
             height: self
                 .motion
                 .height_tween(cur_h as f32, to_h as f32, dur, velocity, now),
             rolled_at_end: rolled,
+            content_alpha,
         });
         // Chevron angle (and anything else reading the roll progress) moves with the height:
         // same duration and curve, continuous when a roll is reversed mid-flight.

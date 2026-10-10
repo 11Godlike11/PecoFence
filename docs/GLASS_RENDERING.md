@@ -162,3 +162,24 @@ the old open started at 46 px from a 45 px shelf, while the new first presented
 heights were 55–73 px. Maximum inter-resize gaps for the new opens were 13.02–16.81
 ms. These are local HWND/update timings, not display-frame or perceived-smoothness
 guarantees.
+
+In we.10, Liquid Glass keeps a full-height composition drawing surface while
+folding. Only the logical viewport and continuous root clip change; the surface
+brush retains its physical size, so an old folded raster cannot be stretched into
+the expanded window. The new lens frame is drawn before SetWindowPos exposes its
+new bounds, and the matching WM_SIZE avoids a second draw. Size notifications
+are reconciled against the HWND's actual size instead of an old message payload.
+The content fade uses the same client clock as the height; completion stops any
+opacity animation and rests the glyph, visibility, alpha and geometry together.
+Relayout during a transition retains the expanded icon raster.
+The client frame clock is capped at 60 Hz, including successful but unusually
+fast compositor waits. This leaves the message loop time to handle input and
+timers instead of filling it with repeated glass redraws.
+
+Native checks with five fences, live WPE capture and the user's roll-up settings
+exercise twenty hover expansions, twenty mid-fold reversals and twenty injected
+old size notifications. Window/viewport dimensions and settled glyph/opacity
+are checked, along with stable drawing-surface allocation and retained icon
+rasters. A desktop capture was inspected for complete icon rows and the expanded
+outline. This does not prove that the user's previously intermittent presentation
+glitch is resolved; acceptance still requires testing the installed build.

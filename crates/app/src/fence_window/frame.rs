@@ -91,6 +91,11 @@ impl FenceWindow {
             let Some(v) = guard.as_mut() else {
                 return false;
             };
+            if let Some(t) = v.roll_anim.as_ref().and_then(|a| a.content_alpha) {
+                v.content_panel
+                    .visual
+                    .set_opacity(t.value_at(now).clamp(0.0, 1.0));
+            }
             let height = v
                 .roll_anim
                 .as_ref()
@@ -117,7 +122,32 @@ impl FenceWindow {
         };
         let r = window::window_rect(hwnd);
         if h != r.bottom - r.top {
-            let _ = window::set_window_bounds(hwnd, r.left, r.top, r.right - r.left, h);
+            // Publish a complete liquid-glass frame before enlarging the native window.
+            // Repeated surface Resize followed by a later WM_SIZE draw could expose an
+            // old collapsed capsule while the window had already become full height.
+            self.with_view(|v| {
+                if v.theme.liquid_glass {
+                    let w = r.right - r.left;
+                    let next = RECT {
+                        bottom: r.top + h,
+                        ..r
+                    };
+                    v.update_backdrop_at(next);
+                    let drawn = v
+                        .update_shape_clip(w, h)
+                        .and_then(|_| v.resize_chrome_viewport(w, h))
+                        .and_then(|_| v.draw_chrome_panel());
+                    match drawn {
+                        Ok(()) => v.prepared_height_frame = Some((w, h)),
+                        Err(error) => tracing::error!(%error, "prepare height frame failed"),
+                    }
+                }
+            });
+            if let Err(error) = window::set_window_bounds(hwnd, r.left, r.top, r.right - r.left, h)
+            {
+                tracing::error!(%error, "apply height frame failed");
+            }
+            self.with_view(|v| v.prepared_height_frame = None);
         }
         if !done {
             return true;
@@ -132,6 +162,8 @@ impl FenceWindow {
             v.height_anim = None;
             if let Some(rolled) = rolled_at_end {
                 v.rolled_up = rolled;
+                v.roll_t = Tween::at(rolled as u8 as f32, Instant::now());
+                let _ = v.motion.stop(&v.content_panel.visual, Prop::Opacity);
                 v.content_panel.visual.set_opacity(1.0);
                 v.content_panel.visual.set_visible(!rolled);
             }

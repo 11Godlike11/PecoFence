@@ -43,6 +43,8 @@ pub struct Panel {
     surface: CompositionDrawingSurface,
     width_px: i32,
     height_px: i32,
+    backing_px: (i32, i32),
+    surface_resizes: u64,
 }
 
 impl Panel {
@@ -56,6 +58,8 @@ impl Panel {
             surface,
             width_px: 1,
             height_px: 1,
+            backing_px: (1, 1),
+            surface_resizes: 0,
         })
     }
 
@@ -63,12 +67,44 @@ impl Panel {
         (self.width_px, self.height_px)
     }
 
+    pub fn backing_state(&self) -> ((i32, i32), u64) {
+        (self.backing_px, self.surface_resizes)
+    }
+
+    /// Keep a stable drawing surface while a parent clip reveals a changing viewport.
+    /// The visual retains the backing size, so its surface brush never stretches old pixels.
+    pub fn reserve_height(&mut self, width_px: i32, height_px: i32) -> Result<()> {
+        let next = (width_px.max(1), height_px.max(self.backing_px.1).max(1));
+        self.resize_backing(next)
+    }
+
+    pub fn resize_viewport(&mut self, width_px: i32, height_px: i32) -> Result<bool> {
+        let next = (width_px.max(1), height_px.max(1));
+        if next == self.size_px() && next.0 == self.backing_px.0 && next.1 <= self.backing_px.1 {
+            return Ok(false);
+        }
+        self.reserve_height(next.0, next.1)?;
+        self.width_px = next.0;
+        self.height_px = next.1;
+        Ok(true)
+    }
+
+    fn resize_backing(&mut self, next: (i32, i32)) -> Result<()> {
+        if next != self.backing_px {
+            self.surface.resize(next.0, next.1)?;
+            self.visual.set_size(next.0 as f32, next.1 as f32);
+            self.backing_px = next;
+            self.surface_resizes += 1;
+        }
+        Ok(())
+    }
+
     /// Replaces the backing surface with one from the (rebuilt) graphics device, keeping the
     /// visual in place. Contents must be redrawn afterwards.
     pub fn recreate(&mut self, stack: &RenderStack) -> Result<()> {
         let surface = stack
             .graphics()
-            .create_drawing_surface(self.width_px as f32, self.height_px as f32)?;
+            .create_drawing_surface(self.backing_px.0 as f32, self.backing_px.1 as f32)?;
         self.visual
             .set_brush(&stack.compositor.create_surface_brush(&surface));
         self.surface = surface;
@@ -79,11 +115,12 @@ impl Panel {
     pub fn resize(&mut self, width_px: i32, height_px: i32) -> Result<bool> {
         let width_px = width_px.max(1);
         let height_px = height_px.max(1);
-        if (width_px, height_px) == (self.width_px, self.height_px) {
+        if (width_px, height_px) == (self.width_px, self.height_px)
+            && (width_px, height_px) == self.backing_px
+        {
             return Ok(false);
         }
-        self.surface.resize(width_px, height_px)?;
-        self.visual.set_size(width_px as f32, height_px as f32);
+        self.resize_backing((width_px, height_px))?;
         self.width_px = width_px;
         self.height_px = height_px;
         Ok(true)

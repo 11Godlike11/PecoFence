@@ -249,6 +249,8 @@ pub struct FenceViewState {
     /// Auto-height settle (250 ms point-to-point): the bottom edge glides to the fitting
     /// height. Separate from `roll_anim` so it never blocks hover-peek or the chevron.
     pub(super) height_anim: Option<Tween>,
+    /// Liquid-glass frame already drawn before SetWindowPos publishes its new bounds.
+    pub(super) prepared_height_frame: Option<(i32, i32)>,
     /// Whole-window fade in progress and its generation (see `VisFade`).
     pub(super) vis_fade: Option<VisFade>,
     pub(super) vis_gen: usize,

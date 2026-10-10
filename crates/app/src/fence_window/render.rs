@@ -526,11 +526,16 @@ impl FenceViewState {
         self.motion
             .set_center(&self.root, w as f32 / 2.0, h as f32 / 2.0);
         self.update_shape_clip(w, h)?;
-        self.chrome_panel.resize(w, h)?;
+        self.resize_chrome_viewport(w, h)?;
         let title_h = self.title_h_px();
         // Keep the expanded raster while folded. Shrinking it to one pixel at the
         // end of every collapse forced a large allocation and icon redraw on open.
-        let content_h = if self.rolled_up && self.roll_anim.is_none() {
+        let content_h = if self.height_animating() {
+            self.content_panel
+                .size_px()
+                .1
+                .max((self.height_target_px().unwrap_or(h).max(h) - title_h).max(1))
+        } else if self.rolled_up && self.roll_anim.is_none() {
             self.content_panel.size_px().1.max(1)
         } else {
             (h - title_h).max(1)
@@ -543,6 +548,15 @@ impl FenceViewState {
         self.content_panel
             .visual
             .set_visible(!self.rolled_up || self.roll_anim.is_some());
+        Ok(())
+    }
+
+    pub(super) fn resize_chrome_viewport(&mut self, w: i32, h: i32) -> Result<()> {
+        if self.theme.liquid_glass {
+            self.chrome_panel.resize_viewport(w, h)?;
+        } else {
+            self.chrome_panel.resize(w, h)?;
+        }
         Ok(())
     }
 
