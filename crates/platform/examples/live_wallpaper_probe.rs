@@ -82,6 +82,15 @@ fn main() {
     }
     let worker = LiveWallpaper::new();
     worker.set_enabled(true);
+    // Exclude capture-session startup from the steady-state cadence sample.
+    let warmup = Instant::now();
+    while worker.take_latest().is_none() {
+        assert!(
+            warmup.elapsed() < Duration::from_secs(3),
+            "worker warmup timed out"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
     let start = Instant::now();
     let mut frames = 0;
     while start.elapsed() < Duration::from_secs(4) {
@@ -94,7 +103,7 @@ fn main() {
     println!(
         "worker_frames={frames} elapsed_ms={} target_fps={}",
         start.elapsed().as_millis(),
-        1000 / worker.interval_ms
+        worker.fps
     );
     assert!(
         frames >= 10,

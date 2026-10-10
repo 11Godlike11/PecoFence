@@ -426,6 +426,7 @@ pub struct LiveWallpaper {
     shared: Arc<Shared>,
     thread: Option<thread::JoinHandle<()>>,
     pub interval_ms: u32,
+    pub fps: u32,
 }
 
 impl Default for LiveWallpaper {
@@ -439,9 +440,10 @@ impl LiveWallpaper {
         let fps = std::env::var("PECOFENCE_WALLPAPER_FPS")
             .ok()
             .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(20)
+            .unwrap_or(60)
             .clamp(1, 60);
-        let interval_ms = 1000 / fps;
+        let interval_ms = 1000u32.div_ceil(fps);
+        let interval = Duration::from_nanos(1_000_000_000 / u64::from(fps));
         let shared = Arc::new(Shared {
             enabled: AtomicBool::new(false),
             stop: AtomicBool::new(false),
@@ -457,14 +459,15 @@ impl LiveWallpaper {
                 };
                 let mut surfaces: Vec<Surface> = Vec::new();
                 let mut discovery = Instant::now() - Duration::from_secs(3);
+                let mut deadline = Instant::now();
                 while !worker.stop.load(Ordering::Relaxed) {
                     if !worker.enabled.load(Ordering::Relaxed) {
                         surfaces.clear();
                         discovery = Instant::now() - Duration::from_secs(3);
                         thread::sleep(Duration::from_millis(100));
+                        deadline = Instant::now();
                         continue;
                     }
-                    let start = Instant::now();
                     if discovery.elapsed() >= Duration::from_millis(500) {
                         worker
                             .engine_running
@@ -509,9 +512,15 @@ impl LiveWallpaper {
                             });
                         }
                     }
-                    thread::sleep(
-                        Duration::from_millis(interval_ms as u64).saturating_sub(start.elapsed()),
-                    );
+                    // Keep a monotonic cadence: a small sleep/readback overrun must
+                    // not discard the next whole frame slot. Reset after a full missed
+                    // interval so a long stall never causes a burst of catch-up frames.
+                    deadline += interval;
+                    let now = Instant::now();
+                    if now.saturating_duration_since(deadline) >= interval {
+                        deadline = now;
+                    }
+                    thread::sleep(deadline.saturating_duration_since(now));
                 }
             });
         let thread = match spawned {
@@ -525,6 +534,7 @@ impl LiveWallpaper {
             shared,
             thread,
             interval_ms,
+            fps,
         }
     }
 

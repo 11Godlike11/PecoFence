@@ -309,6 +309,101 @@ pub(crate) fn displacement_field(
             }
         }
     }
+    let RasterMasks {
+        rim,
+        shade,
+        coverage,
+        frost,
+    } = raster_masks(width, height, scale, radius);
+    DisplacementField {
+        width: map_w,
+        height: map_h,
+        rgba,
+        rim,
+        shade,
+        coverage,
+        frost,
+        blur_px: 1.15f32.min(w.min(h) * 0.04) * scale,
+        rim_width: width,
+        rim_height: height,
+        scale_px,
+    }
+}
+
+struct RasterMasks {
+    rim: Vec<u8>,
+    shade: Vec<u8>,
+    coverage: Vec<u8>,
+    frost: Vec<u8>,
+}
+
+struct MaskTemplate {
+    key: (u32, u32),
+    size: u32,
+    cap: u32,
+    masks: RasterMasks,
+}
+
+thread_local! {
+    // Stable order-2.5 corners are independent of the fence's growing height.
+    // Keep a bounded set for DPI/radius changes, not a cache for every animation size.
+    static MASK_TEMPLATES: std::cell::RefCell<Vec<MaskTemplate>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn stretch_mask(source: &[u8], size: u32, cap: u32, width: u32, height: u32) -> Vec<u8> {
+    let mut result = Vec::with_capacity(width as usize * height as usize);
+    for y in 0..height {
+        let sy = if y < cap {
+            y
+        } else if y >= height - cap {
+            size - (height - y)
+        } else {
+            cap
+        };
+        let row = &source[(sy * size) as usize..((sy + 1) * size) as usize];
+        result.extend_from_slice(&row[..cap as usize]);
+        result.resize(result.len() + (width - 2 * cap) as usize, row[cap as usize]);
+        result.extend_from_slice(&row[(size - cap) as usize..]);
+    }
+    result
+}
+
+fn raster_masks(width: u32, height: u32, scale: f32, radius: f32) -> RasterMasks {
+    let size = (4.0 * radius * scale).ceil() as u32 + 4;
+    if radius <= 0.0 || width < size || height < size {
+        return raster_masks_direct(width, height, scale, radius);
+    }
+    MASK_TEMPLATES.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let key = (scale.to_bits(), radius.to_bits());
+        let index = if let Some(index) = cache.iter().position(|entry| entry.key == key) {
+            index
+        } else {
+            if cache.len() == 4 {
+                cache.remove(0);
+            }
+            cache.push(MaskTemplate {
+                key,
+                size,
+                cap: (radius * scale).ceil() as u32 + 1,
+                masks: raster_masks_direct(size, size, scale, radius),
+            });
+            cache.len() - 1
+        };
+        let t = &cache[index];
+        RasterMasks {
+            rim: stretch_mask(&t.masks.rim, t.size, t.cap, width, height),
+            shade: stretch_mask(&t.masks.shade, t.size, t.cap, width, height),
+            coverage: stretch_mask(&t.masks.coverage, t.size, t.cap, width, height),
+            frost: stretch_mask(&t.masks.frost, t.size, t.cap, width, height),
+        }
+    })
+}
+
+fn raster_masks_direct(width: u32, height: u32, scale: f32, radius: f32) -> RasterMasks {
+    let (w, h) = (width as f32 / scale, height as f32 / scale);
+    let shape = crate::glass_shape::GlassShape::new(w, h, radius);
+    let bezel = OPTICAL_BEVEL_DIP.min(w.min(h) * 0.25).min(radius);
     let mut rim = vec![0u8; width as usize * height as usize];
     let mut shade = vec![0u8; rim.len()];
     let mut coverage = vec![255u8; rim.len()];
@@ -346,18 +441,11 @@ pub(crate) fn displacement_field(
             x += 1;
         }
     }
-    DisplacementField {
-        width: map_w,
-        height: map_h,
-        rgba,
+    RasterMasks {
         rim,
         shade,
         coverage,
         frost,
-        blur_px: 1.15f32.min(w.min(h) * 0.04) * scale,
-        rim_width: width,
-        rim_height: height,
-        scale_px,
     }
 }
 
@@ -635,6 +723,33 @@ fn crop_with_neighbors(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stretched_masks_preserve_exact_corners_at_fold_sizes_and_dpi() {
+        for (width, height, scale, radius) in [
+            (801, 997, 1.25, 42.0),
+            (799, 214, 1.25, 42.0),
+            (640, 169, 1.0, 42.0),
+            (800, 45, 1.25, 18.0),
+            (1141, 681, 1.5, 42.0),
+            (720, 533, 2.0, 32.0),
+        ] {
+            let cached = raster_masks(width, height, scale, radius);
+            let reference = raster_masks_direct(width, height, scale, radius);
+            for (name, a, b) in [
+                ("rim", cached.rim, reference.rim),
+                ("shade", cached.shade, reference.shade),
+                ("coverage", cached.coverage, reference.coverage),
+                ("frost", cached.frost, reference.frost),
+            ] {
+                assert_eq!(a.len(), b.len());
+                assert!(
+                    a.iter().zip(&b).all(|(x, y)| x.abs_diff(*y) <= 1),
+                    "{name} differs at {width}x{height}, scale {scale}"
+                );
+            }
+        }
+    }
 
     fn from_half(bits: u16) -> f32 {
         let exponent = ((bits >> 10) & 0x1f) as i32;

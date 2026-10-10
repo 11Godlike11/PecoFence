@@ -128,7 +128,16 @@ impl FenceWindow {
             // animation, in the pass that redraws everything anyway).
             v.update_backdrop();
             let (w, h) = window::window_rect_size(hwnd);
-            if let Err(e) = v.layout_panels(w, h).and_then(|_| v.redraw()) {
+            if let Err(e) = v.layout_panels(w, h).and_then(|_| {
+                if !v.rolled_up
+                    && (v.content_dirty
+                        || v.content_ink != Some(v.material_foreground().text_primary))
+                {
+                    v.redraw()
+                } else {
+                    v.redraw_chrome_only()
+                }
+            }) {
                 tracing::error!(error = %e, "redraw after height animation failed");
             }
             v.update_shadow_now();

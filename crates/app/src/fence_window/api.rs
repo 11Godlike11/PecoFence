@@ -129,6 +129,9 @@ impl FenceWindow {
             renaming: None,
             title_renaming: false,
             unfold_cache: None,
+            content_dirty: true,
+            content_ink: None,
+            content_draws: 0,
             detach_pending: false,
             detach_cancelled: false,
             remote_drag: None,
@@ -371,7 +374,7 @@ impl FenceWindow {
             },
         );
         format!(
-            "title={:?} opacity={:.2} scale={:.3} fade={fade} retired={} rolled={} rolling={} peeking={} items={} tabs={} selected={} focused={:?} shadow_visible={} shadow_alpha={} layout={:?} locked={} auto_height={} active={} scroll={:.1} client={:?} client_offset=({},{}) chrome={:?} glass={:?} wallpaper_uploads={} title_size={} tab_fonts={:?} tab_rects={:?} capture={} tab_drag={} window_drag={} detach_pending={} plate_inset={} plate_alpha={:.2} mouse_inside={}",
+            "title={:?} opacity={:.2} scale={:.3} fade={fade} retired={} rolled={} rolling={} peeking={} items={} tabs={} selected={} focused={:?} shadow_visible={} shadow_alpha={} layout={:?} locked={} auto_height={} active={} scroll={:.1} client={:?} client_offset=({},{}) chrome={:?} glass={:?} wallpaper_uploads={} title_size={} tab_fonts={:?} tab_rects={:?} capture={} tab_drag={} window_drag={} detach_pending={} plate_inset={} plate_alpha={:.2} mouse_inside={} content_surface={:?} content_dirty={} content_draws={} glass_strength={:.3}",
             v.title,
             v.root.opacity(),
             v.root.scale().x,
@@ -411,6 +414,10 @@ impl FenceWindow {
             v.plate_inset_px,
             v.plate_alpha,
             v.mouse_inside,
+            v.content_panel.size_px(),
+            v.content_dirty,
+            v.content_draws,
+            v.gpu_glass.borrow().strength(),
         )
     }
 
@@ -1400,6 +1407,15 @@ impl FenceWindow {
                 if let Err(error) = result {
                     tracing::warn!(%error, "live wallpaper redraw failed");
                 }
+            }
+        });
+    }
+
+    pub fn set_live_glass_strength(&self, strength: f32, redraw: bool) {
+        self.with_view(|v| {
+            v.gpu_glass.borrow_mut().set_strength(strength);
+            if redraw && desktop::is_visible(v.hwnd) {
+                let _ = v.redraw_chrome_only();
             }
         });
     }

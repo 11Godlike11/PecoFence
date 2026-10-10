@@ -528,7 +528,14 @@ impl FenceViewState {
         self.update_shape_clip(w, h)?;
         self.chrome_panel.resize(w, h)?;
         let title_h = self.title_h_px();
-        let content_h = (h - title_h).max(1);
+        // Keep the expanded raster while folded. Shrinking it to one pixel at the
+        // end of every collapse forced a large allocation and icon redraw on open.
+        let content_h = if self.rolled_up && self.roll_anim.is_none() {
+            self.content_panel.size_px().1.max(1)
+        } else {
+            (h - title_h).max(1)
+        };
+        self.content_dirty |= self.content_panel.size_px() != (w, content_h);
         self.content_panel.resize(w, content_h)?;
         self.content_panel
             .visual
@@ -662,6 +669,7 @@ impl FenceViewState {
     pub fn redraw(&mut self) -> Result<()> {
         self.draw_chrome_panel()?;
         if self.rolled_up && self.roll_anim.is_none() {
+            self.content_dirty = true;
             return Ok(());
         }
         self.redraw_content()
@@ -709,6 +717,10 @@ impl FenceViewState {
     }
 
     pub(super) fn redraw_content(&mut self) -> Result<()> {
+        if self.rolled_up && self.roll_anim.is_none() {
+            self.content_dirty = true;
+            return Ok(());
+        }
         if self.row_metrics().is_some() {
             return self.redraw_rows();
         }
@@ -850,6 +862,11 @@ impl FenceViewState {
         })?;
         self.note_draw_result(ok);
         self.note_content_fades(now);
+        if ok {
+            self.content_dirty = false;
+            self.content_ink = Some(theme.text_primary);
+            self.content_draws += 1;
+        }
         Ok(())
     }
 
@@ -1038,6 +1055,11 @@ impl FenceViewState {
             })?;
         self.note_draw_result(ok);
         self.note_content_fades(now);
+        if ok {
+            self.content_dirty = false;
+            self.content_ink = Some(theme.text_primary);
+            self.content_draws += 1;
+        }
         Ok(())
     }
 }

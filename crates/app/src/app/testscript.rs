@@ -121,6 +121,14 @@ impl App {
                 }
                 ["dump", tag] => self.test_dump(tag),
                 #[cfg(debug_assertions)]
+                ["live-activity", state @ ("on" | "off" | "system")] => {
+                    self.test_live_activity(match *state {
+                        "on" => Some(true),
+                        "off" => Some(false),
+                        _ => None,
+                    });
+                }
+                #[cfg(debug_assertions)]
                 ["pace", ms] => {
                     if pecofence_core::brand::var_os("PECOFENCE_UI_TEST_WINDOWS").is_some()
                         && let Ok(ms) = ms.parse::<u32>()
@@ -589,6 +597,7 @@ impl App {
     }
 
     fn test_dump(&self, tag: &str) {
+        tracing::info!(target: "pecofence::test", "[{tag}] live_material {}", self.live_render_state());
         for (kind, w) in self
             .fences
             .values()

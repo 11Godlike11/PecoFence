@@ -1098,11 +1098,7 @@ impl App {
         window::set_coalescable_timer(app.control.hwnd(), TIMER_HOUSEKEEPING, 60_000, 5_000);
         window::set_coalescable_timer(app.control.hwnd(), TIMER_WALLPAPER_POLL, 5_000, 500);
         window::set_coalescable_timer(app.control.hwnd(), TIMER_DESKTOP_ID, 100, 25);
-        window::set_timer(
-            app.control.hwnd(),
-            TIMER_LIVE_WALLPAPER,
-            app.live_wallpaper.worker.interval_ms,
-        );
+        window::set_timer(app.control.hwnd(), TIMER_LIVE_WALLPAPER, 100);
         // Close the gap between the startup snapshot and installing the registry watchers.
         window::post_message(app.control.hwnd(), WM_APP_WALLPAPER, 0, 0);
 

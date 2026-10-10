@@ -12,6 +12,9 @@ pub struct FenceViewState {
     pub expanded_h_px: i32,
     pub icon_size: u32,
     pub label_lines: u8,
+    pub(super) content_dirty: bool,
+    pub(super) content_ink: Option<ColorF>,
+    pub(super) content_draws: u64,
     pub items: Vec<ItemView>,
     /// Tabs shown in the title row (the host itself first). One entry = plain title.
     pub(super) tabs: Vec<TabView>,

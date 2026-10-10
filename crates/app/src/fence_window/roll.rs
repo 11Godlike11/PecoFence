@@ -419,6 +419,7 @@ impl FenceViewState {
             // Rasterise the content once at its final size; the growing HWND reveals it.
             let (w, _) = self.chrome_panel.size_px();
             let title_h = self.title_h_px();
+            self.content_dirty |= self.content_panel.size_px() != (w, (to_h - title_h).max(1));
             let _ = self.content_panel.resize(w, (to_h - title_h).max(1));
             self.content_panel
                 .visual
@@ -427,7 +428,11 @@ impl FenceViewState {
                 self.content_panel.visual.set_opacity(0.0);
             }
             self.content_panel.visual.set_visible(true);
-            let _ = self.redraw_content();
+            if self.content_dirty
+                || self.content_ink != Some(self.material_foreground().text_primary)
+            {
+                let _ = self.redraw_content();
+            }
             let _ = self.motion.fade_to(
                 &self.content_panel.visual,
                 1.0,

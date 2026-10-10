@@ -1,4 +1,4 @@
-# Personal Liquid Glass renderer (we.6)
+# Personal Liquid Glass renderer (we.7)
 
 This is a Windows Direct2D approximation of Apple's material, not Apple's shader
 or a demonstrated pixel-perfect reproduction. The current renderer was rebuilt
@@ -44,6 +44,19 @@ without the former four-offset white/black halo.
 The single-title hover state and fold glyph no longer add an independent glass
 capsule or circular rim across the fence corners. Hover/press feedback remains
 in the outer material and glyph color; multi-tab lenses retain their tab feedback.
+
+For large dimensions with settled order-2.5 corners, raster coverage/frost/light
+masks reuse a bounded set of CPU corner templates. Smaller fold heights still use
+their exact morphed geometry. Tests compare stretched masks with direct generation
+at fractional DPI and odd dimensions within one alpha value. Shadow templates are
+large enough to reach the settled corner order too, and are compared with direct
+rendering at full, intermediate and capsule heights.
+
+Optical strength scales GPU displacement, blur, contour and glints without rebuilding
+geometry or replacing the real wallpaper. Zero strength leaves a sharp opaque source.
+Restoration uses a 650 ms smootherstep after the first fresh capture. The expanded
+content raster is retained while folded and repainted only when invalidated or its
+adaptive ink changes; folding no longer reallocates it as a one-pixel surface.
 
 ## Sources and attribution
 
@@ -94,3 +107,17 @@ cover intermediate fold heights and agreement between shadow coverage and clip.
 The we.6 header change was compared before/after at 125% DPI over the same saved
 wallpaper using the GPU preview's `title-hover` mode. It removes the separate
 header capsule and fold-button circle without changing the outer optical model.
+
+The we.7 GPU checkerboard regression checks sharp suspended pixels, opacity and
+restoring optics at strengths 0/0.25/0.5/1 with one map build and one source upload.
+On this machine the 800 x 298 resize benchmark's completed GPU+readback median
+was 1.26 ms (we.6: 2.37 ms), and 1152 x 1066 was 3.43 ms (we.6: 4.89 ms).
+These offscreen stage timings exclude native window and layered-shadow work.
+
+Paired we.6/we.7 release runs used the same saved wallpaper, 800 x 1000 pixel
+fence, 125% DPI and six fold/unfold cycles. The summed crop/draw/shadow stage
+median was 6.218 -> 4.771 ms, p95 10.575 -> 8.240 ms and maximum
+12.985 -> 9.810 ms (389/446 resize samples). These measure work performed for
+each resize, not end-to-end display latency. Native cache checks additionally
+verified that reopening reuses the full content surface and changing width while
+folded causes exactly one content redraw on expansion.

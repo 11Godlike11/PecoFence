@@ -84,10 +84,18 @@ impl GpuSurface {
     pub(crate) fn capture(&mut self, left: i32, top: i32) -> Result<Option<CapturedWallpaper>> {
         // Drain the bounded pool and use its newest frame. Paused wallpapers retain their
         // last valid GPU frame; absence of a new frame is not a capture failure.
+        let mut newest: Option<b::Direct3D11CaptureFrame> = None;
         for _ in 0..2 {
             let Ok(frame) = self.pool.TryGetNextFrame() else {
                 break;
             };
+            if let Some(old) = newest.replace(frame) {
+                let _ = old.cast::<b::IClosable>()?.Close();
+            }
+        }
+        // Old queued frames are never displayed. Read back only the newest texture,
+        // avoiding a second full-screen GPU stall and copy after a late wake-up.
+        if let Some(frame) = newest {
             let result = self.read_frame(&frame);
             let _ = frame.cast::<b::IClosable>()?.Close();
             result?;

@@ -193,7 +193,13 @@ struct ShadowTemplate {
 impl ShadowTemplate {
     /// Corner extent (body pixels) past which the shadow no longer depends on the corner.
     fn corner_px(scale: f32, style: &ShadowStyle) -> i32 {
-        ((style.radius + style.sigma * 3.0 + style.offset_y) * scale).ceil() as i32 + 2
+        let reach = style.radius + style.sigma * 3.0 + style.offset_y;
+        let reach = if style.continuous {
+            reach.max(style.radius * 2.0)
+        } else {
+            reach
+        };
+        (reach * scale).ceil() as i32 + 2
     }
 
     /// Smallest body edge `make` / `make_wide` can stretch along.
@@ -560,6 +566,33 @@ pub fn is_shadow_class(hwnd: HWND) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn continuous_shadow_template_matches_large_and_folding_silhouettes() {
+        let style = ShadowStyle {
+            radius: 42.0,
+            continuous: true,
+            ..ShadowStyle::LIGHT
+        };
+        let scale = 1.25;
+        let full = ShadowTemplate::build(scale, &style);
+        for height in [1000, 240, 180, 90, 45] {
+            let stretched = if height >= full.min_body() {
+                full.make(800, height)
+            } else {
+                ShadowTemplate::build_for_height(scale, &style, height).make_wide(800)
+            };
+            let direct = render_shadow(800, height, scale, &style);
+            assert!(
+                stretched
+                    .bgra
+                    .iter()
+                    .zip(&direct.bgra)
+                    .all(|(a, b)| a.abs_diff(*b) <= 1),
+                "shadow template mismatch at height {height}"
+            );
+        }
+    }
 
     fn alpha(img: &Image, x: i32, y: i32) -> u8 {
         img.bgra[((y * img.width as i32 + x) * 4 + 3) as usize]

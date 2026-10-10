@@ -1,7 +1,7 @@
 # Wallpaper Engine personal build
 
 This fork adds live Wallpaper Engine backgrounds to **Liquid Glass**. Version
-`0.1.5-we.6` is based on upstream PecoFence 0.1.5. The GPU optics now use
+`0.1.5-we.7` is based on upstream PecoFence 0.1.5. The GPU optics now use
 continuous superellipse corners, a flat face, curved edge displacement, subtle
 interior frost and narrow directional glints. The material and Windows compositor
 clip share the same silhouette. Whole-face magnification and the previous broad
@@ -41,8 +41,20 @@ maximized/full-screen applications, the glass keeps the current paused frame.
 ## Runtime behavior
 
 - Enabled automatically for Liquid Glass; no config migration is required.
-- Default update rate: 20 FPS. Set `PECOFENCE_WALLPAPER_FPS` before starting the
-  app to choose 1–60 FPS. Higher rates increase CPU/GPU work.
+- Default capture target: 60 FPS. Set `PECOFENCE_WALLPAPER_FPS` before starting the
+  app to choose 1–60 FPS. The worker uses monotonic deadlines; long overruns are
+  skipped. Actual delivery also depends on capture cost and WPE's playback rate.
+- Live updates share the compositor frame clock with fence animations. A 100 ms
+  fallback poll detects returning focus; there is no competing 60 Hz UI timer.
+- Switching to another application, including a full-screen application, suspends
+  live capture and sets optical strength to zero. The last real WPE frame stays
+  in the material, with sharp pixels and no refraction, blur or glints. Focus loss
+  never restores the Windows native wallpaper. Startup primes one real WPE frame
+  even when the app starts behind another window.
+- Returning to the desktop waits for a newly captured frame, then restores optical
+  strength with a 650 ms smootherstep ramp. A second focus loss cancels that ramp.
+  PecoFence popups and an explicitly requested Peek remain interactive; a full-screen
+  PecoFence window also suspends ordinary desktop rendering.
 - Set `PECOFENCE_LIVE_WALLPAPER=0` before starting to use the original static
   pipeline. An explicit `--wallpaper` override also disables live capture.
 - Capture runs on a dedicated worker with a capacity-one mailbox. A blocked
@@ -63,7 +75,7 @@ maximized/full-screen applications, the glass keeps the current paused frame.
 - GPU sessions/GDI surfaces are reused and rediscovered every 500 ms. Failed GPU
   sessions are recreated. Lens geometry is
   reused between frames; unchanged images skip GPU uploads and fence redraws.
-- Capture suspends when no fence window is visible or the theme is Fluent.
+- Capture also suspends when no fence window is visible or the theme is Fluent.
 - Update links point to this fork, so checking for updates cannot install the
   upstream build over this personal modification.
 
@@ -114,6 +126,20 @@ These checks do not establish the user's visual acceptance or native iOS fidelit
 The we.5 native input and paired fold timings are recorded in GLASS_RENDERING.md.
 Manual collapse cancels pending peek timers and stays collapsed on hover; an
 automatically collapsed screen-edge shelf still supports hover expansion.
+
+The we.7 native integration exercised inactive -> early/middle/full restoration,
+pause during restoration, return to the real foreground policy, and stable source
+upload counts during suspension. The observed middle strength was 0.487; full
+restoration reached 1.0. Separate fold checks retained an 800 x 955 pixel content
+surface at the 45 pixel folded height and reused it on open; changing the folded
+width to 700 caused exactly one new content draw at expansion. These are automated
+native-window checks, not a claim about perceived smoothness on every machine.
+
+The final we.7 GPU capture probe received 240 worker frames in 4004 ms after
+warmup at 2560 x 1440, and its two wallpaper samples differed. The worker reads
+back only the newest queued GPU texture; older queued frames are closed without
+an unnecessary full-screen GPU readback. Frame delivery is a local observation,
+not a guarantee that every wallpaper animates at 60 FPS.
 
 A five-second sample of `0.1.5-we.1` with five installed fences measured about 1.4% of total CPU
 capacity on a 20-logical-processor machine and a 109 MB working set. This is a

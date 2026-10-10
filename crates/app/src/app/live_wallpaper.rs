@@ -2,6 +2,79 @@
 use super::*;
 use pecofence_platform::live_wallpaper::{CONTRAST_SAMPLE_FACTOR, LiveWallpaper};
 
+const FILL_DURATION: Duration = Duration::from_millis(650);
+
+#[derive(Default)]
+struct GlassActivity {
+    active: bool,
+    fresh_after: Option<Instant>,
+    filling_since: Option<Instant>,
+}
+
+impl GlassActivity {
+    fn set_active(&mut self, active: bool, now: Instant) -> bool {
+        if self.active == active {
+            return false;
+        }
+        self.active = active;
+        self.fresh_after = active.then_some(now);
+        self.filling_since = None;
+        true
+    }
+
+    fn frame_received(&mut self, captured: Instant, now: Instant) {
+        if self.active
+            && self.filling_since.is_none()
+            && self.fresh_after.is_some_and(|after| captured >= after)
+        {
+            self.filling_since = Some(now);
+        }
+    }
+
+    fn strength(&self, now: Instant) -> f32 {
+        let Some(start) = self.filling_since.filter(|_| self.active) else {
+            return 0.0;
+        };
+        let t = (now.saturating_duration_since(start).as_secs_f32() / FILL_DURATION.as_secs_f32())
+            .clamp(0.0, 1.0);
+        t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+    }
+}
+
+fn desktop_has_focus() -> bool {
+    let root = desktop::root_ancestor(desktop::foreground_window());
+    if root.0.is_null() {
+        return false;
+    }
+    let pid = desktop::window_pid(root);
+    let class = desktop::class_name(root);
+    let shell_pid = desktop::window_pid(desktop::shell_window());
+    let our_pid = pecofence_platform::process::current_pid();
+    if pid != our_pid {
+        return foreground_allows_glass(&class, pid, shell_pid, our_pid, false);
+    }
+    let r = window::window_rect(root);
+    // Our full-screen settings/test surface can cover the desktop too.
+    let fullscreen = monitors::query(monitors::monitor_from_window(root)).is_some_and(|m| {
+        r.left <= m.bounds.left
+            && r.top <= m.bounds.top
+            && r.right >= m.bounds.right
+            && r.bottom >= m.bounds.bottom
+    });
+    foreground_allows_glass(&class, pid, shell_pid, our_pid, fullscreen)
+}
+
+fn foreground_allows_glass(
+    class: &str,
+    pid: u32,
+    shell_pid: u32,
+    our_pid: u32,
+    fullscreen: bool,
+) -> bool {
+    ((class == "Progman" || class == "WorkerW") && pid == shell_pid)
+        || (pid == our_pid && !fullscreen)
+}
+
 pub(super) struct LiveBackdrop {
     pub worker: LiveWallpaper,
     static_set: Option<Rc<BackdropSets>>,
@@ -9,6 +82,11 @@ pub(super) struct LiveBackdrop {
     applied: Option<(u64, Rc<BackdropSets>)>,
     waiting: bool,
     disabled: bool,
+    activity: GlassActivity,
+    bootstrap_until: Instant,
+    strength: f32,
+    #[cfg(debug_assertions)]
+    activity_override: Option<bool>,
 }
 
 impl Default for LiveBackdrop {
@@ -21,23 +99,58 @@ impl Default for LiveBackdrop {
             waiting: false,
             disabled: pecofence_core::brand::var("PECOFENCE_LIVE_WALLPAPER")
                 .is_ok_and(|s| s == "0"),
+            activity: GlassActivity::default(),
+            bootstrap_until: Instant::now() + Duration::from_secs(2),
+            strength: 1.0,
+            #[cfg(debug_assertions)]
+            activity_override: None,
         }
     }
 }
 
 impl App {
-    pub(super) fn tick_live_wallpaper(&mut self) {
+    pub(super) fn tick_live_wallpaper(&mut self) -> bool {
         let enabled = !self.live_wallpaper.disabled
             && self.wallpaper_override.is_none()
             && self.ctx.theme.borrow().liquid_glass
             && self.fences.values().any(|f| desktop::is_visible(f.hwnd()));
-        self.live_wallpaper.worker.set_enabled(enabled);
-        let frame = enabled
+        let now = Instant::now();
+        let focused = self.peek.is_some() || desktop_has_focus();
+        #[cfg(debug_assertions)]
+        let focused = self.live_wallpaper.activity_override.unwrap_or(focused);
+        let active = enabled && focused;
+        if self.live_wallpaper.activity.set_active(active, now) {
+            tracing::info!(active, "live glass desktop activity changed");
+        }
+        // Prime a real WPE image once even when launched behind another application.
+        // Losing focus retains that image; it must never trigger native-wallpaper fallback.
+        let capture = enabled
+            && (active
+                || (self.live_wallpaper.applied.is_none()
+                    && now < self.live_wallpaper.bootstrap_until));
+        self.live_wallpaper.worker.set_enabled(capture);
+        if capture {
+            self.ctx.frames.request();
+        }
+        let strength = if enabled {
+            self.live_wallpaper.activity.strength(now)
+        } else {
+            1.0
+        };
+        let strength_changed = (self.live_wallpaper.strength - strength).abs() > 0.0001;
+        self.live_wallpaper.strength = strength;
+        for fence in self.fences.values() {
+            fence.set_live_glass_strength(strength, false);
+        }
+        let frame = capture
             .then(|| self.live_wallpaper.worker.take_latest())
             .flatten();
         if let Some(frame) = frame.filter(|f| f.captured_at.elapsed() < Duration::from_millis(500))
         {
             let started = Instant::now();
+            self.live_wallpaper
+                .activity
+                .frame_received(frame.captured_at, now);
             let fingerprint = frame.fingerprint;
             if self
                 .live_wallpaper
@@ -50,7 +163,10 @@ impl App {
                 // A paused WPE frame is a valid heartbeat: no uploads or redraws needed.
                 self.live_wallpaper.last_frame = Some(frame.captured_at);
                 self.live_wallpaper.waiting = false;
-                return;
+                if strength_changed {
+                    self.redraw_live_material();
+                }
+                return capture;
             }
             // A theme/topology refresh may have installed a new static set since the last
             // frame. Track it without ever caching a video frame as a static wallpaper.
@@ -130,7 +246,7 @@ impl App {
                 if self.live_wallpaper.last_frame.is_none() {
                     tracing::info!(
                         monitors = replaced,
-                        fps = 1000 / self.live_wallpaper.worker.interval_ms,
+                        fps = self.live_wallpaper.worker.fps,
                         "Wallpaper Engine live glass active"
                     );
                 }
@@ -140,7 +256,7 @@ impl App {
                 let prepared = Instant::now();
                 self.apply_live_backdrops(set);
                 tracing::trace!(target: "pecofence::live_timing", prep_us = prepared.duration_since(started).as_micros(), draw_us = prepared.elapsed().as_micros(), "live wallpaper apply");
-                return;
+                return capture;
             }
         }
         if self
@@ -172,7 +288,8 @@ impl App {
             {
                 self.apply_live_backdrops(set.clone());
             }
-            if !self.live_wallpaper.waiting
+            if capture
+                && !self.live_wallpaper.waiting
                 && self
                     .live_wallpaper
                     .last_frame
@@ -182,6 +299,34 @@ impl App {
                 tracing::warn!("Wallpaper Engine capture reconnecting; retaining last live frame");
             }
         }
+        if strength_changed {
+            self.redraw_live_material();
+        }
+        capture
+    }
+
+    fn redraw_live_material(&self) {
+        for fence in self.fences.values() {
+            fence.set_live_glass_strength(self.live_wallpaper.strength, true);
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    pub(super) fn test_live_activity(&mut self, active: Option<bool>) {
+        if pecofence_core::brand::var_os("PECOFENCE_UI_TEST_WINDOWS").is_some() {
+            self.live_wallpaper.activity_override = active;
+            self.tick_live_wallpaper();
+        }
+    }
+
+    pub(super) fn live_render_state(&self) -> String {
+        format!(
+            "active={} strength={:.3} fps={} has_live={}",
+            self.live_wallpaper.activity.active,
+            self.live_wallpaper.strength,
+            self.live_wallpaper.worker.fps,
+            self.live_wallpaper.applied.is_some()
+        )
     }
 
     fn apply_live_backdrops(&mut self, set: Rc<BackdropSets>) {
@@ -190,5 +335,58 @@ impl App {
             fence.set_live_backdrops(set.clone());
         }
         self.ctx.bitmaps.borrow_mut().prune_wallpapers();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn foreign_apps_and_fullscreen_pause_but_the_desktop_and_our_popups_resume() {
+        assert!(foreground_allows_glass("Progman", 1, 1, 2, false));
+        assert!(foreground_allows_glass("WorkerW", 1, 1, 2, true));
+        assert!(!foreground_allows_glass("WorkerW", 3, 1, 2, false));
+        assert!(!foreground_allows_glass(
+            "Chrome_WidgetWin_1",
+            3,
+            1,
+            2,
+            false
+        ));
+        assert!(!foreground_allows_glass("GameWindow", 3, 1, 2, true));
+        assert!(foreground_allows_glass(
+            "PecoFence.Settings",
+            2,
+            1,
+            2,
+            false
+        ));
+        assert!(!foreground_allows_glass(
+            "PecoFence.Settings",
+            2,
+            1,
+            2,
+            true
+        ));
+    }
+
+    #[test]
+    fn returning_to_desktop_waits_for_fresh_capture_then_fills_smoothly() {
+        let now = Instant::now();
+        let mut activity = GlassActivity::default();
+        assert_eq!(activity.strength(now), 0.0);
+        assert!(activity.set_active(true, now));
+        activity.frame_received(now - Duration::from_millis(1), now);
+        assert_eq!(activity.strength(now + FILL_DURATION), 0.0);
+        activity.frame_received(now, now);
+        assert_eq!(activity.strength(now), 0.0);
+        assert!((activity.strength(now + FILL_DURATION / 2) - 0.5).abs() < 0.001);
+        assert_eq!(activity.strength(now + FILL_DURATION), 1.0);
+        assert!(activity.strength(now + Duration::from_millis(16)) < 0.001);
+        assert!(activity.set_active(false, now + FILL_DURATION));
+        assert_eq!(activity.strength(now + FILL_DURATION), 0.0);
+        assert!(activity.set_active(true, now + FILL_DURATION));
+        assert_eq!(activity.strength(now + FILL_DURATION * 2), 0.0);
     }
 }

@@ -115,6 +115,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "the centre must not be a transparent hole"
         );
         let mut ramp = Image::solid(800, 500, [0; 3]);
+        for strength in [0.0, 0.25, 0.5, 1.0] {
+            renderer.set_strength(strength);
+            target.draw(|s| {
+                s.clear(ColorF::TRANSPARENT);
+                renderer.draw(
+                    s,
+                    &mut cache,
+                    &checker,
+                    [-200, 80, 260, 160],
+                    0.0,
+                    1.0,
+                    24.0,
+                    1.0,
+                    0.0,
+                )
+            })?;
+            let pixels = target.read_pixels()?;
+            assert_eq!(
+                pixels[centre + 3],
+                255,
+                "pause must retain opaque real wallpaper"
+            );
+            if strength == 0.0 {
+                assert!(
+                    pixels[centre] <= 1 && pixels[centre + 4] >= 254,
+                    "paused optics must leave wallpaper sharp"
+                );
+            } else if strength == 1.0 {
+                assert!((pixels[centre] as i32 - 128).abs() <= 2);
+            }
+        }
+        assert_eq!(
+            renderer.stats().map_builds,
+            1,
+            "filling must reuse geometry"
+        );
+        assert_eq!(cache.uploads, 1, "filling must reuse the source upload");
+        println!("paused sharp wallpaper and progressive optics restoration passed");
         for (i, pixel) in ramp.bgra.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             pixel[..3].fill((i % 800 / 4) as u8);
         }

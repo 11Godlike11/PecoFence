@@ -248,6 +248,9 @@ struct Effects {
     geometry: Option<(u32, u32, u32, u32)>,
     opacity: Option<u32>,
     light_level: Option<u32>,
+    optical_strength: Option<u32>,
+    displacement_px: f32,
+    blur_px: f32,
 }
 
 impl Effects {
@@ -341,6 +344,9 @@ impl Effects {
             geometry: None,
             opacity: None,
             light_level: Some(RIM_LIGHT.to_bits()),
+            optical_strength: None,
+            displacement_px: 0.0,
+            blur_px: 0.0,
         })
     }
 
@@ -454,7 +460,36 @@ impl Effects {
             self.layer.SetInput(0, &coverage, true);
         }
         self.geometry = Some(key);
+        self.displacement_px = field.scale_px;
+        self.blur_px = field.blur_px;
+        self.optical_strength = None;
         Ok(true)
+    }
+
+    fn set_strength(&mut self, strength: f32) -> Result<()> {
+        if self.optical_strength == Some(strength.to_bits()) {
+            return Ok(());
+        }
+        scalar(
+            &self.displace,
+            b::D2D1_DISPLACEMENTMAP_PROP_SCALE,
+            self.displacement_px * strength,
+        )?;
+        scalar(
+            &self.soft_displace,
+            b::D2D1_DISPLACEMENTMAP_PROP_SCALE,
+            self.displacement_px * strength,
+        )?;
+        scalar(
+            &self.blur,
+            b::D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
+            self.blur_px * strength,
+        )?;
+        let mut contour = [0.0; 20];
+        contour[15] = CONTOUR_OPACITY * strength;
+        color_matrix(&self.shade, contour)?;
+        self.optical_strength = Some(strength.to_bits());
+        Ok(())
     }
 
     fn set_light(&mut self, level: f32) -> Result<()> {
@@ -468,6 +503,7 @@ impl Effects {
 
 #[derive(Default)]
 pub struct GpuGlass {
+    strength: Option<f32>,
     effects: Option<Effects>,
     /// Surface row (device px) the last `draw` placed the plate's lens at: a folded title row
     /// moves it down, and header lenses sample the refracted plate relative to it.
@@ -485,6 +521,14 @@ struct Control {
 }
 
 impl GpuGlass {
+    /// Pause optics without replacing the last real wallpaper or invalidating its maps.
+    pub fn set_strength(&mut self, strength: f32) {
+        self.strength = Some(strength.clamp(0.0, 1.0));
+    }
+
+    pub fn strength(&self) -> f32 {
+        self.strength.unwrap_or(1.0)
+    }
     /// Tint and floating backing follow exactly the same continuous silhouette.
     pub fn draw_layer(
         &self,
@@ -530,7 +574,9 @@ impl GpuGlass {
         result
     }
     pub fn reset(&mut self) {
+        let strength = self.strength;
         *self = Self::default();
+        self.strength = strength;
     }
     pub fn stats(&self) -> Stats {
         self.stats
@@ -661,6 +707,8 @@ impl GpuGlass {
         if effects.geometry(&context, w, h, scale, radius)? {
             self.stats.control_map_builds += 1;
         }
+        effects.set_strength(self.strength.unwrap_or(1.0))?;
+        effects.set_light(RIM_LIGHT * self.strength.unwrap_or(1.0))?;
         let (x, y) = (rect.left * scale, rect.top * scale);
         // The parent surface starts at the plate top (`origin_y`), not at the window top.
         matrix(
@@ -730,6 +778,7 @@ impl GpuGlass {
         if effects.geometry(&context, w, h, scale, radius)? {
             self.stats.map_builds += 1;
         }
+        effects.set_strength(self.strength.unwrap_or(1.0))?;
         matrix(
             &effects.position,
             [1.0, 0.0, 0.0, 1.0, -rect[0] as f32, -rect[1] as f32],
@@ -744,7 +793,9 @@ impl GpuGlass {
             effects.opacity = Some(opacity.to_bits());
         }
         // Hover lifts the rim light with the application's existing animation clock.
-        effects.set_light(RIM_LIGHT * (1.0 + 0.35 * hover.clamp(0.0, 1.0)))?;
+        effects.set_light(
+            RIM_LIGHT * (1.0 + 0.35 * hover.clamp(0.0, 1.0)) * self.strength.unwrap_or(1.0),
+        )?;
         let area = b::D2D_RECT_F {
             left: 0.0,
             top: 0.0,

@@ -150,6 +150,9 @@ impl App {
         if peek_done {
             self.end_peek_now();
         }
+        // Animation work goes first; live video joins this compositor tick instead
+        // of competing with it through a separate high-frequency WM_TIMER.
+        more |= self.tick_live_wallpaper();
         let spent = now.elapsed();
         self.frame_run.max_frame = self.frame_run.max_frame.max(spent);
         if more {
