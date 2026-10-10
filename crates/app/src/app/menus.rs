@@ -250,6 +250,20 @@ impl App {
         {
             let verb = sm.verb(cmd).unwrap_or_default();
             tracing::info!(cmd, %verb, count = paths.len(), "shell verb invoked");
+            if verb.eq_ignore_ascii_case("copy") || verb.eq_ignore_ascii_case("cut") {
+                self.clipboard_verb(fence, &items, verb.eq_ignore_ascii_case("cut"));
+                return;
+            }
+            if verb.eq_ignore_ascii_case("rename")
+                && items.len() == 1
+                && self
+                    .state
+                    .item(items[0])
+                    .is_some_and(|it| !it.is_namespace())
+            {
+                self.begin_item_rename(fence, items[0]);
+                return;
+            }
             // Shift at the moment of choosing (Shift+click on 删除 = permanent, as in Explorer).
             let shift = window::key_down(msg::VK_SHIFT);
             if let Err(e) = sm.invoke(cmd, owner, POINT { x, y }, shift) {
@@ -328,7 +342,8 @@ impl App {
         self.build_item_menu(fence, &[item]).0.labels()
     }
 
-    /// The item context menu: our commands, then Explorer's own menu for the same files.
+    /// Keep Shell commands in the system's order. Virtual grouping belongs to a single
+    /// app-attributed submenu rather than interrupting file actions at the top of the menu.
     fn build_item_menu(
         &self,
         fence: FenceId,
@@ -340,34 +355,68 @@ impl App {
             items[..],
             [only] if self.state.item(only).is_some_and(|it| it.is_namespace())
         );
-        menu.item(
-            CMD_ITEM_OPEN,
-            pecofence_core::i18n::text("打开\tEnter"),
-            false,
-            false,
-        )
-        .default_item(CMD_ITEM_OPEN)
-        .item(
+        let paths = self.shell_paths_of(items);
+        let mut shell_menu =
+            ShellContextMenu::for_paths(&paths.iter().map(|p| p.as_path()).collect::<Vec<_>>())
+                .ok();
+        let native_available = shell_menu.as_mut().is_some_and(|sm| {
+            match sm.populate(
+                menu.handle(),
+                0,
+                CMD_SHELL_FIRST,
+                CMD_SHELL_LAST,
+                window::key_down(msg::VK_SHIFT),
+            ) {
+                Ok(count) => count > 0,
+                Err(e) => {
+                    tracing::warn!(error = %e, "shell context menu unavailable");
+                    false
+                }
+            }
+        });
+        if !native_available {
+            shell_menu = None;
+            menu.item(
+                CMD_ITEM_OPEN,
+                pecofence_core::i18n::text("打开\tEnter"),
+                false,
+                false,
+            )
+            .default_item(CMD_ITEM_OPEN)
+            .item(
+                CMD_ITEM_LOCATION,
+                pecofence_core::i18n::text("打开文件所在位置"),
+                false,
+                items.len() != 1 || single_namespace,
+            )
+            .item(
+                CMD_ITEM_RENAME,
+                pecofence_core::i18n::text("重命名\tF2"),
+                false,
+                items.len() != 1 || single_namespace,
+            )
+            .item(
+                CMD_ITEM_DELETE,
+                pecofence_core::i18n::text("删除\tDelete"),
+                false,
+                single_namespace,
+            )
+            .item(
+                CMD_ITEM_PROPERTIES,
+                pecofence_core::i18n::text("属性\tAlt+Enter"),
+                false,
+                false,
+            );
+        }
+        let app_menu = PopupMenu::new();
+        app_menu.item(
             CMD_ITEM_LOCATION,
             pecofence_core::i18n::text("打开文件所在位置"),
             false,
             items.len() != 1 || single_namespace,
-        )
-        .item(
-            CMD_ITEM_RENAME,
-            pecofence_core::i18n::text("重命名\tF2"),
-            false,
-            items.len() != 1 || single_namespace,
-        )
-        .item(
-            CMD_ITEM_DELETE,
-            pecofence_core::i18n::text("删除\tDelete"),
-            false,
-            single_namespace,
-        )
-        .separator();
+        );
         if self.single_folder_of(items).is_some() {
-            menu.item(
+            app_menu.item(
                 CMD_ITEM_PORTAL,
                 pecofence_core::i18n::text("在桌面显示此文件夹"),
                 false,
@@ -402,51 +451,25 @@ impl App {
         for (id, title, disabled) in &targets {
             move_menu.item(*id, title, false, *disabled);
         }
-        menu.submenu(pecofence_core::i18n::text("移动到栅栏"), move_menu);
-        menu.item(
-            CMD_ITEM_TO_INBOX,
-            if self.state.portal_path(fence).is_some() {
-                pecofence_core::i18n::text("移出到桌面（移动文件）")
-            } else {
-                pecofence_core::i18n::text("移出栅栏，放到桌面")
-            },
-            false,
-            on_desktop,
-        );
-        menu.separator();
-        // Explorer's own menu (send to / copy / delete / pin / extensions …) appended below ours.
-        let paths = self.shell_paths_of(items);
-        let mut shell_menu =
-            ShellContextMenu::for_paths(&paths.iter().map(|p| p.as_path()).collect::<Vec<_>>())
-                .ok();
-        let mut shell_items = 0;
-        if let Some(sm) = shell_menu.as_mut() {
-            let extended = window::key_down(msg::VK_SHIFT);
-            match sm.populate(
-                menu.handle(),
-                menu.len(),
-                CMD_SHELL_FIRST,
-                CMD_SHELL_LAST,
-                extended,
-            ) {
-                Ok(n) => {
-                    shell_items = n;
-                    // Explorer's own 打开 / 删除 (and 重命名 where it adds one) duplicate ours.
-                    sm.remove_verbs(menu.handle(), &["open", "delete", "rename"]);
-                    menu.tidy_separators();
-                }
-                Err(e) => tracing::warn!(error = %e, "shell context menu unavailable"),
-            }
+        if !targets.is_empty() {
+            app_menu.submenu("放入栅栏", move_menu);
         }
-        if shell_items == 0 {
-            shell_menu = None;
-            menu.item(
-                CMD_ITEM_PROPERTIES,
-                pecofence_core::i18n::text("属性\tAlt+Enter"),
+        if !on_desktop {
+            app_menu.item(
+                CMD_ITEM_TO_INBOX,
+                if self.state.portal_path(fence).is_some() {
+                    pecofence_core::i18n::text("移出到桌面（移动文件）")
+                } else {
+                    pecofence_core::i18n::text("移出栅栏，放到桌面")
+                },
                 false,
                 false,
             );
         }
+        menu.separator()
+            .submenu("PecoFence", app_menu)
+            .icon(glyph::ADD_TO);
+        menu.tidy_separators();
         (menu, shell_menu, paths)
     }
 
@@ -903,7 +926,7 @@ impl App {
                 settings.desktop_view.align_grid,
                 false,
             );
-        menu.submenu("查看", view);
+        menu.submenu("查看", view).icon(glyph::VIEW_ALL);
         let sort = PopupMenu::new();
         for (cmd, mode, label) in [
             (CMD_FENCE_SORT_NAME, SortMode::Name, "名称"),
@@ -914,23 +937,37 @@ impl App {
             sort.item(cmd, label, settings.desktop_view.sort == mode, false);
         }
         menu.submenu("排序方式", sort)
+            .icon(glyph::SORT)
             .item(CMD_DESKTOP_REFRESH, "刷新\tF5", false, false)
+            .icon(glyph::REPAIR)
             .separator()
             .item(
                 CMD_FENCE_PASTE,
                 "粘贴\tCtrl+V",
                 false,
                 !clipboard::has_file_list(),
-            );
+            )
+            .icon(glyph::PASTE);
         let new = PopupMenu::new();
         new.item(CMD_FENCE_NEW_FOLDER, "文件夹\tCtrl+Shift+N", false, false)
+            .icon(glyph::FOLDER)
             .item(CMD_FENCE_NEW_TEXT, "文本文档", false, false)
-            .separator()
-            .item(CMD_NEW_FENCE_HERE, "虚拟栅栏", false, false);
+            .icon(glyph::DOCUMENT);
+        let app_menu = PopupMenu::new();
+        app_menu
+            .item(CMD_NEW_FENCE_HERE, "新建栅栏", false, false)
+            .icon(glyph::ADD_TO)
+            .item(CMD_SETTINGS, "设置…", false, false)
+            .icon(glyph::SETTING);
         menu.submenu("新建", new)
+            .icon(glyph::ADD)
+            .submenu("PecoFence", app_menu)
+            .icon(glyph::ADD_TO)
             .separator()
             .item(CMD_DESKTOP_DISPLAY, "显示设置", false, false)
-            .item(CMD_DESKTOP_PERSONALIZE, "个性化", false, false);
+            .icon(glyph::MONITOR)
+            .item(CMD_DESKTOP_PERSONALIZE, "个性化", false, false)
+            .icon(glyph::SETTING);
         let owner = self
             .window_for(fence)
             .map_or(self.control.hwnd(), |w| w.hwnd());
@@ -967,6 +1004,7 @@ impl App {
                 self.arrange_desktop();
             }
             CMD_DESKTOP_REFRESH => self.manual_refresh(fence),
+            CMD_SETTINGS => self.queue.push(Command::OpenSettings),
             CMD_FENCE_PASTE => self.paste_into(fence),
             CMD_FENCE_NEW_FOLDER => self.create_desktop_item(fence, true),
             CMD_FENCE_NEW_TEXT => self.create_desktop_item(fence, false),

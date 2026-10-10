@@ -358,11 +358,15 @@ impl PopupMenu {
         unsafe {
             let px = GetSystemMetricsForDpi(SM_CXSMICON, dpi);
             let disabled = GetMenuState(self.hmenu, pos, MF_BYPOSITION as u32) & MF_GRAYED as u32;
-            let color = GetSysColor(if disabled != 0 {
-                COLOR_GRAYTEXT
+            let color = if crate::menu_skin::uses_dark_colors() {
+                if disabled != 0 { 0x808080 } else { 0xf5f5f5 }
             } else {
-                COLOR_MENUTEXT
-            });
+                GetSysColor(if disabled != 0 {
+                    COLOR_GRAYTEXT
+                } else {
+                    COLOR_MENUTEXT
+                })
+            };
             let Some(bitmap) = glyph_bitmap(glyph, px, color) else {
                 return self;
             };
@@ -471,6 +475,7 @@ impl PopupMenu {
     }
 
     fn show_aligned(&self, owner: HWND, x: i32, y: i32, bottom_align: bool) -> u32 {
+        let _presentation = crate::menu_skin::Session::begin(self.hmenu, owner);
         let mut flags = (TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_LEFTALIGN) as u32;
         if bottom_align {
             flags |= TPM_BOTTOMALIGN as u32;

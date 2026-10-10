@@ -76,7 +76,8 @@ impl ShellContextMenu {
         last: u32,
         extended: bool,
     ) -> Result<u32> {
-        let mut flags = CMF_NORMAL as u32;
+        // The host handles the rename verb with its own inline editor.
+        let mut flags = CMF_NORMAL as u32 | 0x10; // CMF_CANRENAME
         if extended {
             flags |= CMF_EXTENDEDVERBS as u32;
         }
@@ -214,13 +215,24 @@ impl Drop for ShellContextMenu {
 /// Routes menu messages to the active shell menu. Returns the result to hand back to the system
 /// when the shell handled the message; `None` otherwise (including when no shell menu is active).
 pub fn forward_menu_message(msg: u32, wparam: usize, lparam: isize) -> Option<isize> {
+    if let Some(result) = crate::menu_skin::forward(msg, wparam, lparam) {
+        return Some(result);
+    }
     const INITMENUPOPUP: u32 = WM_INITMENUPOPUP as u32;
     const DRAWITEM: u32 = WM_DRAWITEM as u32;
     const MEASUREITEM: u32 = WM_MEASUREITEM as u32;
     if !matches!(msg, INITMENUPOPUP | DRAWITEM | MEASUREITEM | WM_MENUCHAR) {
         return None;
     }
-    let menu = ACTIVE.with(|a| a.borrow().clone())?;
+    let menu = ACTIVE.with(|a| a.borrow().clone());
+    let result = menu.and_then(|menu| forward_to_shell(&menu, msg, wparam, lparam));
+    if msg == INITMENUPOPUP {
+        crate::menu_skin::prepare_popup(HMENU(wparam as *mut core::ffi::c_void));
+    }
+    result
+}
+
+fn forward_to_shell(menu: &IContextMenu, msg: u32, wparam: usize, lparam: isize) -> Option<isize> {
     // SAFETY: plain COM calls on an interface we hold a reference to.
     unsafe {
         if let Ok(m3) = menu.cast::<IContextMenu3>() {

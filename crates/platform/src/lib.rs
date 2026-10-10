@@ -65,6 +65,7 @@ pub mod layered;
 pub mod live_wallpaper;
 pub mod locale;
 pub mod memstats;
+mod menu_skin;
 pub mod monitors;
 pub mod msg;
 pub mod pipe;
