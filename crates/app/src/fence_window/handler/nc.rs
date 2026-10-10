@@ -174,6 +174,7 @@ pub(super) fn on_ncmousemove(
             }
         }
         if v.rolled_up
+            && !v.manual_fold_latched
             && !v.peeking
             && v.roll_anim.is_none()
             && behavior.hover_peek.get()
@@ -360,16 +361,8 @@ pub(super) fn on_nclbuttondblclk(
             // already expanded (click-to-expand): same click, nothing to do.
             return Some(0);
         }
-        let was_peeking = view.borrow_mut().as_mut().map(|v| {
-            let p = v.peeking;
-            v.peeking = false;
-            p
-        });
-        if was_peeking == Some(true) {
-            // Already expanded by peek: commit the expanded state.
-            queue.push(Command::CommitExpanded(fence_id));
-        } else {
-            queue.push(Command::ToggleRollUp(fence_id));
+        if let Some(v) = view.borrow().as_ref() {
+            queue.push(Command::SetRollUp(fence_id, !v.roll_target()));
         }
         return Some(0);
     }

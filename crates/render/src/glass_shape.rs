@@ -1,25 +1,35 @@
 //! One continuous-corner silhouette for the lens, lighting, mask and DWM clip.
 //! A superellipse of order 2.5 has zero curvature at its straight-edge joins.
-//! Capsules use circles; stretching a squircle into a capsule produces flat ends.
+//! Folding smoothly morphs the order toward circular capsule ends.
 use windows_canvas::{GpuDevice, Path, PathBuilder, Vector2};
 use windows_core::Result;
 
 const SEGMENTS: usize = 64;
 
-pub(crate) struct GlassShape {
+pub struct GlassShape {
     pub width: f32,
     pub height: f32,
     pub radius: f32,
     circular: bool,
     quarter: Vec<Vector2>,
+    segments: Vec<(Vector2, Vector2, f32, Vector2)>,
+    order: f32,
 }
 
 impl GlassShape {
     pub fn new(width: f32, height: f32, radius: f32) -> Self {
         let radius = radius.max(0.0).min(width.min(height) * 0.5);
         let circular = radius >= width.min(height) * 0.5 - 0.01;
-        let exponent = if circular { 1.0 } else { 0.8 };
-        let quarter = (0..=SEGMENTS)
+        // Morph continuously into circular capsule ends as the two corners meet.
+        // A binary order-2.5 -> circle switch visibly popped during a fold.
+        let t = if radius > 0.0 {
+            (width.min(height) / (2.0 * radius) - 1.0).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let order = 2.0 + 0.5 * t * t * (3.0 - 2.0 * t);
+        let exponent = 2.0 / order;
+        let quarter: Vec<_> = (0..=SEGMENTS)
             .map(|i| {
                 let t = i as f32 / SEGMENTS as f32 * std::f32::consts::FRAC_PI_2;
                 Vector2::new(
@@ -28,12 +38,24 @@ impl GlassShape {
                 )
             })
             .collect();
+        let segments = quarter
+            .windows(2)
+            .map(|pair| {
+                let a = pair[0];
+                let v = pair[1] - a;
+                let inverse_squared = 1.0 / (v.x * v.x + v.y * v.y);
+                let normal = Vector2::new(v.y, -v.x) * inverse_squared.sqrt();
+                (a, v, inverse_squared, normal)
+            })
+            .collect();
         Self {
             width,
             height,
             radius,
             circular,
             quarter,
+            segments,
+            order,
         }
     }
 
@@ -63,30 +85,34 @@ impl GlassShape {
         }
         let q = q / self.radius;
         let mut best = f32::INFINITY;
-        let mut normal = Vector2::new(0.0, 0.0);
+        let mut closest = Vector2::new(0.0, 0.0);
         let mut inside = true;
-        for pair in self.quarter.windows(2) {
-            let a = pair[0];
-            let v = pair[1] - a;
-            let vv = v.x * v.x + v.y * v.y;
-            let t = (((q.x - a.x) * v.x + (q.y - a.y) * v.y) / vv).clamp(0.0, 1.0);
-            let delta = q - (a + v * t);
+        for &(a, v, inverse_squared, n) in &self.segments {
+            let t = (((q.x - a.x) * v.x + (q.y - a.y) * v.y) * inverse_squared).clamp(0.0, 1.0);
+            let point = a + v * t;
+            let delta = q - point;
             let distance = delta.x * delta.x + delta.y * delta.y;
-            let n = Vector2::new(v.y, -v.x) / vv.sqrt();
             // The polygon is convex; an outside half-plane means outside the shape.
             inside &= (q.x - a.x) * n.x + (q.y - a.y) * n.y <= 0.0;
             if distance < best {
                 best = distance;
-                // At a vertex use the analytic normal, avoiding polygon-facet glints.
-                let closest = a + v * t;
-                let analytic =
-                    Vector2::new(closest.x * closest.x.sqrt(), closest.y * closest.y.sqrt());
-                normal = analytic
-                    / (analytic.x * analytic.x + analytic.y * analytic.y)
-                        .sqrt()
-                        .max(1e-6);
+                closest = point;
             }
         }
+        // Calculate the smooth normal only at the final nearest point, rather than
+        // repeatedly taking square roots for every candidate segment and every texel.
+        let analytic = if self.order == 2.5 {
+            Vector2::new(closest.x * closest.x.sqrt(), closest.y * closest.y.sqrt())
+        } else {
+            Vector2::new(
+                closest.x.powf(self.order - 1.0),
+                closest.y.powf(self.order - 1.0),
+            )
+        };
+        let normal = analytic
+            / (analytic.x * analytic.x + analytic.y * analytic.y)
+                .sqrt()
+                .max(1e-6);
         (
             normal.x * p.x.signum(),
             normal.y * p.y.signum(),
@@ -117,6 +143,27 @@ impl GlassShape {
         points
     }
 
+    /// Fast one-pixel coverage of the same polygon, for blurred CPU shadows.
+    /// A radial binary search selects its boundary segment. The segment's plane
+    /// gives subpixel coverage; no 64-segment nearest-normal search is needed.
+    pub fn coverage(&self, x: f32, y: f32) -> f32 {
+        let q = Vector2::new(
+            (x - self.width * 0.5).abs() - self.width * 0.5 + self.radius,
+            (y - self.height * 0.5).abs() - self.height * 0.5 + self.radius,
+        );
+        if self.circular || self.radius <= 0.001 || q.x <= 0.0 || q.y <= 0.0 {
+            return (self.edge(x, y).2 + 0.5).clamp(0.0, 1.0);
+        }
+        let q = q / self.radius;
+        let i = self
+            .quarter
+            .partition_point(|p| p.y * q.x < q.y * p.x)
+            .saturating_sub(1)
+            .min(SEGMENTS - 1);
+        let (a, _, _, n) = self.segments[i];
+        (0.5 - ((q.x - a.x) * n.x + (q.y - a.y) * n.y) * self.radius).clamp(0.0, 1.0)
+    }
+
     pub fn path(&self, device: &GpuDevice, top: f32) -> Result<Path> {
         PathBuilder::new(device)?.polygon(self.points(top))
     }
@@ -145,5 +192,33 @@ mod tests {
         let capsule = GlassShape::new(120.0, 28.0, 14.0);
         assert!(capsule.circular);
         assert!(capsule.edge(4.0, 4.0).2 < 0.0);
+    }
+
+    #[test]
+    fn fold_morph_and_fast_shadow_coverage_follow_the_clip() {
+        let mut previous = None;
+        for height in 80..=170 {
+            let shape = GlassShape::new(400.0, height as f32, 42.0);
+            let corner = shape.quarter[32] * shape.radius;
+            if let Some(p) = previous {
+                let delta: Vector2 = corner - p;
+                assert!(
+                    delta.x.abs() < 0.5 && delta.y.abs() < 0.5,
+                    "corner popped at {height}"
+                );
+            }
+            previous = Some(corner);
+            for y in -2..48 {
+                for x in -2..48 {
+                    let x = x as f32 + 0.37;
+                    let y = y as f32 + 0.61;
+                    let exact = (shape.edge(x, y).2 + 0.5).clamp(0.0, 1.0);
+                    assert!(
+                        (shape.coverage(x, y) - exact).abs() < 0.004,
+                        "shadow/clip mismatch at {height}, {x}, {y}"
+                    );
+                }
+            }
+        }
     }
 }

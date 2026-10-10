@@ -1,7 +1,7 @@
 # Wallpaper Engine personal build
 
 This fork adds live Wallpaper Engine backgrounds to **Liquid Glass**. Version
-`0.1.5-we.4` is based on upstream PecoFence 0.1.5. The GPU optics now use
+`0.1.5-we.5` is based on upstream PecoFence 0.1.5. The GPU optics now use
 continuous superellipse corners, a flat face, curved edge displacement, subtle
 interior frost and narrow directional glints. The material and Windows compositor
 clip share the same silhouette. Whole-face magnification and the previous broad
@@ -49,6 +49,14 @@ maximized/full-screen applications, the glass keeps the current paused frame.
   `PrintWindow` cannot block the UI. Shutdown allows up to 500 ms to drain GPU sessions
   and only joins a completed worker. The activated GraphicsCapture runtime is pinned
   until process exit to avoid a 24H2 asynchronous DLL unload crash observed in testing.
+- Frame fingerprinting and the 8x8 box-averaged contrast sample also run on that
+  worker. When a captured surface exactly matches a monitor, the UI moves its
+  full-resolution buffer into the upload slot without another full-frame copy
+  or averaging pass. Partially overlapping or spanning surfaces retain the crop
+  fallback; this is not a GPU shared-texture capture path.
+- Live updates redraw only the glass/header when grid/list label ink remains
+  unchanged. A foreground-color change or a row/details view redraws the content
+  too, preserving adaptive text contrast without repainting every icon each frame.
 - Physical window coordinates map directly to monitor pixels, including a
   spanning surface and negative monitor origins. Uncovered monitors keep static
   backgrounds. Multi-monitor operation has not been exercised on physical hardware.
@@ -102,6 +110,10 @@ matched its saved copy after installation.
 Regression checks cover DPI invariance, matching clip/optical geometry, corner
 continuity, the bevel-to-flat-face transition and narrow directional glints.
 These checks do not establish the user's visual acceptance or native iOS fidelity.
+
+The we.5 native input and paired fold timings are recorded in GLASS_RENDERING.md.
+Manual collapse cancels pending peek timers and stays collapsed on hover; an
+automatically collapsed screen-edge shelf still supports hover expansion.
 
 A five-second sample of `0.1.5-we.1` with five installed fences measured about 1.4% of total CPU
 capacity on a 20-logical-processor machine and a 109 MB working set. This is a

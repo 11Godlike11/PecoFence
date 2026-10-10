@@ -405,6 +405,7 @@ pub(super) fn shadow_style_for(theme: &Theme) -> ShadowStyle {
         shadow.sigma = 12.0;
         shadow.offset_y = 5.0;
         shadow.radius = theme.corner_radius;
+        shadow.continuous = true;
     }
     shadow
 }

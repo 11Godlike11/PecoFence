@@ -55,6 +55,7 @@ pub enum Command {
     /// if it now covers another fence, it moves to the nearest free spot.
     FenceDropped(FenceId),
     ToggleRollUp(FenceId),
+    SetRollUp(FenceId, bool),
     /// A hover-peeked fence was double-clicked: keep it expanded.
     CommitExpanded(FenceId),
     LaunchItem(ItemId),

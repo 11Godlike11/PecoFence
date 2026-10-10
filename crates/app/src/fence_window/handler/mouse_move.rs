@@ -419,6 +419,7 @@ pub(super) fn on_mousemove(
     // client-area controls (chevron box, tabs) handled here.
     if in_title
         && v.rolled_up
+        && !v.manual_fold_latched
         && !v.peeking
         && v.roll_anim.is_none()
         && behavior.hover_peek.get()

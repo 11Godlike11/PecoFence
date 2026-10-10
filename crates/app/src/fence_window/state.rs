@@ -126,6 +126,8 @@ pub struct FenceViewState {
     pub(super) label_w: f32,
     pub(super) hover: Option<usize>,
     pub(super) title_hover: bool,
+    /// An explicit collapse stays collapsed until explicitly opened; hover cannot undo it.
+    pub(super) manual_fold_latched: bool,
     pub(super) selected: HashSet<usize>,
     /// Scroll offset in DIPs as drawn and hit-tested; while `scroll_anim` runs it is the
     /// animated value (WinUI ScrollPresenter: wheel, keyboard and paging glide, thumb drags and

@@ -1,4 +1,4 @@
-# Personal Liquid Glass renderer (we.4)
+# Personal Liquid Glass renderer (we.5)
 
 This is a Windows Direct2D approximation of Apple's material, not Apple's shader
 or a demonstrated pixel-perfect reproduction. The current renderer was rebuilt
@@ -10,9 +10,11 @@ not give the desired appearance. We have not run a paired native iOS image test.
 - The fence uses a rounded rectangle with order-2.5 superellipse corners. Each
   quarter has 64 segments; optical distance is measured against that polygon.
   Analytic normals smooth out facet highlights. This is our own approximation,
-  rather than a port of Flutter's rounded-superellipse implementation. Capsules
-  use circular ends. The material mask and Windows Composition path clip share
-  the same geometry, including the folded fence's vertical offset.
+  rather than a port of Flutter's rounded-superellipse implementation. During
+  folding, the order smoothly decreases to 2 as opposing corners meet, producing
+  circular capsule ends without a sudden shape change. The material mask, Windows
+  Composition path clip, outer shadow and selection ring share the same geometry,
+  including the folded fence's vertical offset.
 - The corner radius is 42 DIP. The optical bevel is 20 DIP, reduced for small
   controls. The center is flat: there is no whole-face magnification.
 - For inward depth `s` and bevel width `b`, edge displacement is proportional to
@@ -34,6 +36,11 @@ and DPI. Wallpaper uploads, Gaussian blur, displacement, masks and compositing
 run on Direct2D effects. Geometry maps are not recomputed per wallpaper frame.
 The CPU compatibility renderer is retained and does not have these new optics;
 verification images must explicitly select the GPU renderer.
+
+Map generation skips the flat interior and reuses precomputed polygon segments.
+The CPU shadow obtains antialiased coverage from the same corner polygon using
+a binary sector lookup. Liquid Glass labels use adaptive foreground colors
+without the former four-offset white/black halo.
 
 ## Sources and attribution
 
@@ -71,3 +78,12 @@ neutral frosting rather than an unchanged sharp center.
 frames. Uniform gray, rain and a sunset scene are used to inspect brightness and
 edge artifacts. These previews do not substitute for checking the installed
 window, its compositor clip and the user's visual acceptance.
+
+For we.5, paired native debug builds with the same optimization profile, saved
+wallpaper, 800 x 1000 pixel fence and six fold/unfold cycles measured resize draw
+time at median 7.51 -> 3.97 ms and p95 12.20 -> 6.88 ms. Those figures exclude
+the separate CPU shadow stage, whose median was 2.04 -> 2.20 ms. They are local
+stage timings, not a release FPS guarantee. Native input checks exercised
+hover-open followed by arrow-close, suppression of hover reopening after manual
+collapse, and reversing an in-flight fold by clicking again. Geometry tests
+cover intermediate fold heights and agreement between shadow coverage and clip.

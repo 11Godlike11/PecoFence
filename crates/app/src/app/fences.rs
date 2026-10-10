@@ -727,6 +727,9 @@ impl App {
         if !rolled {
             self.toggle_roll(fence);
         }
+        if let Some(w) = self.fences.get(&fence) {
+            w.allow_hover_expansion();
+        }
         self.schedule_save();
     }
 

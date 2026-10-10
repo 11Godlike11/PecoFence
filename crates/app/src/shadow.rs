@@ -21,6 +21,8 @@ pub struct ShadowStyle {
     pub opacity: f32,
     /// Corner radius of the casting shape in DIPs.
     pub radius: f32,
+    /// Match Liquid Glass's continuous silhouette rather than circular corners.
+    pub continuous: bool,
 }
 
 impl ShadowStyle {
@@ -30,12 +32,14 @@ impl ShadowStyle {
         offset_y: 4.0,
         opacity: 0.30,
         radius: 4.0,
+        continuous: false,
     };
     pub const LIGHT: Self = Self {
         sigma: 8.0,
         offset_y: 4.0,
         opacity: 0.16,
         radius: 4.0,
+        continuous: false,
     };
 
     pub fn pad_px(&self, scale: f32) -> i32 {
@@ -51,6 +55,7 @@ impl ShadowStyle {
 pub struct SelectionRing {
     /// The fence's corner radius (DIPs); the ring is concentric with it.
     pub radius_dip: f32,
+    pub continuous: bool,
 }
 
 /// Distance between the body edge and the ring (DIPs).
@@ -79,7 +84,13 @@ fn draw_ring(img: &mut Image, pad: i32, w: i32, h: i32, scale: f32, ring: &Selec
     let (x0, x1) = ((pad - reach).max(0), (pad + w + reach).min(sw));
     // Rows this close to the top or bottom edge cross a corner or the horizontal stroke.
     let corner = radius.ceil() as i32 + reach;
+    let shape = ring
+        .continuous
+        .then(|| pecofence_render::glass_shape::GlassShape::new(w as f32, h as f32, radius));
     let sdf = |fx: f32, fy: f32| -> f32 {
+        if let Some(shape) = &shape {
+            return -shape.edge(fx, fy).2;
+        }
         let dx = (fx - w as f32 / 2.0).abs() - (w as f32 / 2.0 - radius);
         let dy = (fy - h as f32 / 2.0).abs() - (h as f32 / 2.0 - radius);
         (dx.max(0.0).powi(2) + dy.max(0.0).powi(2)).sqrt() + dx.max(dy).min(0.0) - radius
@@ -127,7 +138,13 @@ fn render_shadow(w: i32, h: i32, scale: f32, style: &ShadowStyle) -> Image {
         bgra: vec![0u8; (sw * sh * 4) as usize],
     };
     // Anti-aliased coverage of the rounded body (signed-distance field) at a body-local point.
+    let shape = style
+        .continuous
+        .then(|| pecofence_render::glass_shape::GlassShape::new(w as f32, h as f32, radius));
     let body_cov = |fx: f32, fy: f32| -> f32 {
+        if let Some(shape) = &shape {
+            return shape.coverage(fx, fy);
+        }
         let dx = (fx - w as f32 / 2.0).abs() - (w as f32 / 2.0 - radius);
         let dy = (fy - h as f32 / 2.0).abs() - (h as f32 / 2.0 - radius);
         let d = (dx.max(0.0).powi(2) + dy.max(0.0).powi(2)).sqrt() + dx.max(dy).min(0.0) - radius;
@@ -629,7 +646,10 @@ mod tests {
     /// every pixel would.
     #[test]
     fn selection_ring_hugs_the_body_outside() {
-        let ring = SelectionRing { radius_dip: 8.0 };
+        let ring = SelectionRing {
+            radius_dip: 8.0,
+            continuous: false,
+        };
         for (w, h, scale, pad) in [(200, 100, 2.0, 56), (120, 72, 1.0, 28), (90, 36, 1.5, 42)] {
             let blank = || Image {
                 width: (w + pad * 2) as u32,

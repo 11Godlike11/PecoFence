@@ -1,10 +1,6 @@
 //! Runtime live-wallpaper overlay, separate from the static virtual-desktop cache.
 use super::*;
-use pecofence_platform::live_wallpaper::LiveWallpaper;
-use std::{
-    collections::hash_map::DefaultHasher,
-    hash::{Hash, Hasher},
-};
+use pecofence_platform::live_wallpaper::{CONTRAST_SAMPLE_FACTOR, LiveWallpaper};
 
 pub(super) struct LiveBackdrop {
     pub worker: LiveWallpaper,
@@ -41,12 +37,8 @@ impl App {
             .flatten();
         if let Some(frame) = frame.filter(|f| f.captured_at.elapsed() < Duration::from_millis(500))
         {
-            let mut hash = DefaultHasher::new();
-            for image in &frame.images {
-                (image.left, image.top, image.width, image.height).hash(&mut hash);
-                image.bgra.hash(&mut hash);
-            }
-            let fingerprint = hash.finish();
+            let started = Instant::now();
+            let fingerprint = frame.fingerprint;
             if self
                 .live_wallpaper
                 .applied
@@ -74,12 +66,33 @@ impl App {
                 .unwrap_or_else(|| self.ctx.backdrops.borrow().clone());
             let mut sources = base.acrylic.as_ref().clone();
             let mut replaced = 0;
-            for captured in frame.images {
+            for (captured, sample) in frame.images.into_iter().zip(frame.samples) {
                 let image = Image {
                     width: captured.width,
                     height: captured.height,
                     bgra: captured.bgra,
                 };
+                // Common path: one captured desktop root and one monitor. Move its
+                // buffer straight into the upload slot, with no full-screen copy or
+                // box averaging on the animation/input thread.
+                if let Some(source) = sources.iter_mut().find(|s| {
+                    s.left == captured.left
+                        && s.top == captured.top
+                        && s.width == captured.width as i32
+                        && s.height == captured.height as i32
+                }) {
+                    source.image = Image {
+                        width: sample.width,
+                        height: sample.height,
+                        bgra: sample.bgra,
+                    };
+                    source.gpu = Some(pecofence_render::backdrop::GpuPixels::new(1, image, || {
+                        None
+                    }));
+                    source.downscale = CONTRAST_SAMPLE_FACTOR;
+                    replaced += 1;
+                    continue;
+                }
                 for source in &mut sources {
                     // Window coordinates are already screen pixels; do not apply wallpaper
                     // fill/fit or DPI scaling again. This also splits a spanning WPE surface.
@@ -124,7 +137,9 @@ impl App {
                 self.live_wallpaper.last_frame = Some(frame.captured_at);
                 self.live_wallpaper.waiting = false;
                 self.live_wallpaper.applied = Some((fingerprint, set.clone()));
+                let prepared = Instant::now();
                 self.apply_live_backdrops(set);
+                tracing::trace!(target: "pecofence::live_timing", prep_us = prepared.duration_since(started).as_micros(), draw_us = prepared.elapsed().as_micros(), "live wallpaper apply");
                 return;
             }
         }

@@ -768,7 +768,7 @@ fn draw_plate(
     Ok(())
 }
 
-/// Halo under a caption drawn in `ink` straight over wallpaper (Liquid Glass labels, a fully
+/// Optional halo under a caption drawn in `ink` straight over wallpaper (a fully
 /// transparent plate): a dark rim under light text, a light one under dark text.
 fn halo_color(ink: ColorF, alpha: f32) -> ColorF {
     if ink.r > 0.5 {
@@ -1552,7 +1552,7 @@ impl FenceChrome {
             style.tint,
         );
         // Captions over bare wallpaper (a fully transparent plate) get a halo.
-        let halo = if theme.text_halo {
+        let halo = if theme.text_halo && !theme.liquid_glass {
             Some(session.create_solid_brush(ColorF::TRANSPARENT)?)
         } else {
             None
@@ -1924,7 +1924,7 @@ impl FenceChrome {
         let secondary = session.create_solid_brush(theme.text_secondary)?;
         let cols = rows.columns;
         let header_h = rows.header_h;
-        let halo = if theme.liquid_glass || theme.text_halo {
+        let halo = if theme.text_halo && !theme.liquid_glass {
             Some(session.create_solid_brush(ColorF::TRANSPARENT)?)
         } else {
             None
@@ -2284,7 +2284,7 @@ impl FenceChrome {
         if !content.group_headers.is_empty() {
             let line = session.create_solid_brush(theme.stroke)?;
             // The same local halo the labels get over mixed wallpaper.
-            let halo = if theme.liquid_glass || theme.text_halo {
+            let halo = if theme.text_halo && !theme.liquid_glass {
                 Some(session.create_solid_brush(if theme.text_secondary.r > 0.5 {
                     ColorF::new(0.0, 0.0, 0.0, 0.28)
                 } else {
@@ -2471,9 +2471,9 @@ impl FenceChrome {
         } else {
             resting
         };
-        // A local halo protects labels over mixed light/dark wallpaper (Liquid Glass, a fully
+        // A local halo protects labels on an explicitly transparent non-glass plate (a fully
         // transparent plate). It does not frost or darken the glass between icons.
-        let halo = if theme.liquid_glass || theme.text_halo {
+        let halo = if theme.text_halo && !theme.liquid_glass {
             Some(session.create_solid_brush(halo_color(theme.text_primary, alpha))?)
         } else {
             None

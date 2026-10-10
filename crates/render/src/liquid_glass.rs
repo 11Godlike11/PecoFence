@@ -280,17 +280,20 @@ pub(crate) fn displacement_field(
     for y in 0..map_h.div_ceil(2) {
         let py = (y as f32 + 0.5) * h / map_h as f32;
         let my = map_h - 1 - y;
-        for x in 0..map_w.div_ceil(2) {
+        let corner_columns = (radius * map_w as f32 / w).ceil() as u32 + 1;
+        let columns = if py > radius {
+            corner_columns.min(map_w.div_ceil(2))
+        } else {
+            map_w.div_ceil(2)
+        };
+        for x in 0..columns {
             let px = (x as f32 + 0.5) * w / map_w as f32;
             let (nx, ny, depth) = shape.edge(px, py);
-            let rim = if bezel > 0.0 && depth < bezel {
-                max_offset * bezel_offset(depth / bezel)
-            } else {
-                0.0
-            };
-            if bezel <= 0.0 {
+            // The buffer is already neutral. Do not calculate or write the flat face.
+            if bezel <= 0.0 || depth >= bezel {
                 continue;
             }
+            let rim = max_offset * bezel_offset(depth / bezel);
             let dx = nx * rim * scale;
             let dy = ny * rim * scale;
             let mx = map_w - 1 - x;

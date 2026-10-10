@@ -5,6 +5,8 @@
 
 use crate::{bindings::*, desktop, wide::from_wide};
 use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -30,7 +32,52 @@ pub struct CapturedWallpaper {
 
 pub struct WallpaperFrame {
     pub images: Vec<CapturedWallpaper>,
+    /// Small, block-averaged contrast images prepared off the UI thread.
+    pub samples: Vec<CapturedWallpaper>,
+    pub fingerprint: u64,
     pub captured_at: Instant,
+}
+
+pub const CONTRAST_SAMPLE_FACTOR: u32 = 8;
+
+fn contrast_sample(image: &CapturedWallpaper) -> CapturedWallpaper {
+    let factor = CONTRAST_SAMPLE_FACTOR as usize;
+    let (sw, sh) = (image.width as usize, image.height as usize);
+    let (width, height) = (sw.div_ceil(factor), sh.div_ceil(factor));
+    let mut bgra = Vec::with_capacity(width * height * 4);
+    let mut sums = vec![0u32; width * 4];
+    for by in 0..height {
+        sums.fill(0);
+        let rows = by * factor..((by + 1) * factor).min(sh);
+        let count = rows.len() as u32;
+        for y in rows {
+            for (x, px) in image.bgra[y * sw * 4..(y + 1) * sw * 4]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .enumerate()
+            {
+                for c in 0..4 {
+                    sums[x / factor * 4 + c] += px[c] as u32;
+                }
+            }
+        }
+        for x in 0..width {
+            let n = count * (((x + 1) * factor).min(sw) - x * factor) as u32;
+            bgra.extend(
+                sums[x * 4..x * 4 + 4]
+                    .iter()
+                    .map(|s| ((s + n / 2) / n) as u8),
+            );
+        }
+    }
+    CapturedWallpaper {
+        left: image.left,
+        top: image.top,
+        width: width as u32,
+        height: height as u32,
+        bgra,
+    }
 }
 
 fn wpe_process(hwnd: HWND) -> bool {
@@ -292,8 +339,10 @@ impl Surface {
     fn new(hwnd: HWND, r: RECT) -> Result<Self> {
         let backend = match crate::gpu_wallpaper::GpuSurface::new(hwnd) {
             Ok(surface) => {
-                tracing::info!(class = %desktop::class_name(hwnd), handle = hwnd.0 as usize,
-                    "Wallpaper Engine Windows Graphics Capture connected");
+                tracing::info!(
+                    handle = hwnd.0 as usize,
+                    "Wallpaper Engine Windows Graphics Capture connected"
+                );
                 Backend::Gpu(surface)
             }
             Err(error) if is_wpe_descendant(hwnd) => {
@@ -439,6 +488,14 @@ impl LiveWallpaper {
                         discovery = Instant::now();
                     }
                     let images: Vec<_> = surfaces.iter_mut().filter_map(Surface::capture).collect();
+                    let captured_at = Instant::now();
+                    let mut hash = DefaultHasher::new();
+                    for image in &images {
+                        (image.left, image.top, image.width, image.height).hash(&mut hash);
+                        image.bgra.hash(&mut hash);
+                    }
+                    let fingerprint = hash.finish();
+                    let samples = images.iter().map(contrast_sample).collect();
                     if worker.enabled.load(Ordering::Relaxed)
                         && !images.is_empty()
                         && let Ok(mut latest) = worker.latest.lock()
@@ -446,7 +503,9 @@ impl LiveWallpaper {
                         if worker.enabled.load(Ordering::Relaxed) {
                             *latest = Some(WallpaperFrame {
                                 images,
-                                captured_at: Instant::now(),
+                                samples,
+                                fingerprint,
+                                captured_at,
                             });
                         }
                     }
@@ -499,5 +558,39 @@ impl Drop for LiveWallpaper {
                 let _ = handle.join();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod contrast_tests {
+    use super::*;
+
+    #[test]
+    fn worker_contrast_sample_averages_partial_blocks_and_preserves_origin() {
+        let mut bgra = Vec::new();
+        for y in 0..11u8 {
+            for x in 0..19u8 {
+                bgra.extend_from_slice(&[x, y, x + y, 255]);
+            }
+        }
+        let source = CapturedWallpaper {
+            left: -2560,
+            top: -80,
+            width: 19,
+            height: 11,
+            bgra,
+        };
+        let sample = contrast_sample(&source);
+        assert_eq!(
+            (sample.left, sample.top, sample.width, sample.height),
+            (-2560, -80, 3, 2)
+        );
+        assert_eq!(
+            sample.bgra,
+            [
+                4, 4, 7, 255, 12, 4, 15, 255, 17, 4, 21, 255, 4, 9, 13, 255, 12, 9, 21, 255, 17, 9,
+                26, 255
+            ]
+        );
     }
 }

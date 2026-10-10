@@ -1252,6 +1252,7 @@ impl App {
             }
             Command::FenceDropped(fence) => self.move_out_of_overlap(fence),
             Command::ToggleRollUp(fence) => self.toggle_roll(fence),
+            Command::SetRollUp(fence, rolled) => self.set_roll(fence, rolled),
             Command::CommitExpanded(fence) => {
                 if let Some(w) = self.fences.get(&fence) {
                     w.commit_expanded();

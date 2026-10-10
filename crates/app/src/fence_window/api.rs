@@ -174,6 +174,7 @@ impl FenceWindow {
             label_w: 0.0,
             hover: None,
             title_hover: false,
+            manual_fold_latched: false,
             selected: HashSet::new(),
             scroll_y: 0.0,
             scroll_memory: HashMap::new(),
@@ -478,6 +479,14 @@ impl FenceWindow {
         }
         let hwnd = self.hwnd();
         match action {
+            "auto-fold" => {
+                self.set_rolled(true);
+                self.allow_hover_expansion();
+            }
+            "peek-open" => {
+                self.with_view(|v| v.title_hover = true);
+                window::send_message(hwnd, msg::WM_TIMER, TIMER_PEEK_OPEN, 0);
+            }
             "pointer" => self.with_view(|v| {
                 if let Some(drag) = v.remote_drag.as_mut() {
                     drag.track_pointer((x, y), window::drag_threshold());
@@ -1109,7 +1118,7 @@ impl FenceWindow {
         self.view
             .borrow()
             .as_ref()
-            .is_some_and(|v| v.rolled_up || v.peeking)
+            .is_some_and(|v| v.roll_target() || v.peeking)
     }
 
     pub fn icon_size(&self) -> u32 {
@@ -1131,6 +1140,9 @@ impl FenceWindow {
     /// Animates to the rolled/expanded state.
     pub fn set_rolled(&self, rolled: bool) {
         self.with_view(|v| {
+            window::kill_timer(v.hwnd, TIMER_PEEK_OPEN);
+            window::kill_timer(v.hwnd, TIMER_PEEK_CLOSE);
+            v.manual_fold_latched = rolled;
             v.peeking = false;
             if v.rolled_up == rolled && v.roll_anim.is_none() {
                 return;
@@ -1140,6 +1152,11 @@ impl FenceWindow {
             }
             v.start_roll_anim(rolled);
         });
+    }
+
+    /// Screen-edge shelves are automatically collapsed and retain hover expansion.
+    pub fn allow_hover_expansion(&self) {
+        self.with_view(|v| v.manual_fold_latched = false);
     }
 
     /// Title-row height and the height the window settles at: the title row while it is rolled
@@ -1372,8 +1389,15 @@ impl FenceWindow {
             v.backdrops = backdrops;
             v.backdrop_rect = None;
             if desktop::is_visible(v.hwnd) {
+                let old_ink = v.material_foreground().text_primary;
                 v.update_backdrop();
-                if let Err(error) = v.redraw() {
+                let changed_ink = old_ink != v.material_foreground().text_primary;
+                let result = if changed_ink || v.row_metrics().is_some() {
+                    v.redraw()
+                } else {
+                    v.redraw_chrome_only()
+                };
+                if let Err(error) = result {
                     tracing::warn!(%error, "live wallpaper redraw failed");
                 }
             }
@@ -1475,5 +1499,6 @@ impl FenceWindow {
 fn selection_ring(theme: &Theme) -> crate::shadow::SelectionRing {
     crate::shadow::SelectionRing {
         radius_dip: theme.corner_radius,
+        continuous: theme.liquid_glass,
     }
 }
