@@ -55,6 +55,7 @@ mod fileops;
 mod group;
 mod ipc;
 mod items;
+mod live_wallpaper;
 mod menus;
 mod motion;
 mod peek;
@@ -122,6 +123,7 @@ const TRAY_RETRY_MS: u32 = 2_000;
 const TIMER_SHUTDOWN_CANCELLED: usize = 58;
 /// Rebuilding the GPU device failed (driver reset in progress): try again, backing off.
 const TIMER_DEVICE_RETRY: usize = 59;
+const TIMER_LIVE_WALLPAPER: usize = 60;
 const DEVICE_RETRY_FIRST_MS: u32 = 1_000;
 const DEVICE_RETRY_MAX_MS: u32 = 30_000;
 const WALLPAPER_PREWARM_DELAY_MS: u32 = 3_000;
@@ -251,6 +253,7 @@ pub struct App {
     /// Fingerprint of the snapshot the current backdrops were built from.
     wallpaper_sig: Option<String>,
     wallpaper_cache: BackdropCache,
+    live_wallpaper: live_wallpaper::LiveBackdrop,
     /// Another virtual desktop's wallpaper being decoded ahead of a switch there.
     prewarm: Option<visuals::PrewarmJob>,
     /// The hotkey currently registered (None = registration failed or Peek disabled).
@@ -531,6 +534,13 @@ impl App {
                                         && let Some(app) = guard.as_mut()
                                     {
                                         app.check_wallpaper("poll");
+                                    }
+                                }
+                                TIMER_LIVE_WALLPAPER => {
+                                    if let Ok(mut guard) = cell.try_borrow_mut()
+                                        && let Some(app) = guard.as_mut()
+                                    {
+                                        app.tick_live_wallpaper();
                                     }
                                 }
                                 TIMER_DESKTOP_ID => {
@@ -949,6 +959,7 @@ impl App {
             cut_clip_seq: 0,
             wallpaper_sig,
             wallpaper_cache: BackdropCache::default(),
+            live_wallpaper: live_wallpaper::LiveBackdrop::default(),
             prewarm: None,
         };
         if let Some(signature) = app.wallpaper_sig.clone() {
@@ -1087,6 +1098,11 @@ impl App {
         window::set_coalescable_timer(app.control.hwnd(), TIMER_HOUSEKEEPING, 60_000, 5_000);
         window::set_coalescable_timer(app.control.hwnd(), TIMER_WALLPAPER_POLL, 5_000, 500);
         window::set_coalescable_timer(app.control.hwnd(), TIMER_DESKTOP_ID, 100, 25);
+        window::set_timer(
+            app.control.hwnd(),
+            TIMER_LIVE_WALLPAPER,
+            app.live_wallpaper.worker.interval_ms,
+        );
         // Close the gap between the startup snapshot and installing the registry watchers.
         window::post_message(app.control.hwnd(), WM_APP_WALLPAPER, 0, 0);
 

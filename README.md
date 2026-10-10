@@ -1,3 +1,9 @@
+# Wallpaper Engine 自用版
+
+本 fork 的 `0.1.5-we.1` 为 Liquid Glass 增加了 Wallpaper Engine 实时壁纸背景。
+已验证网页类雨景壁纸；Fluent 与其他渲染类型的限制、构建方法和回退说明见
+[动态壁纸兼容说明](docs/WALLPAPER_ENGINE.md)。上游作者与许可证保留如下。
+
 https://github.com/user-attachments/assets/c827f059-cfd7-4f6a-bed3-8b00411a7220
 
 <p align="center">

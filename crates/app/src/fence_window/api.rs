@@ -1365,6 +1365,21 @@ impl FenceWindow {
         });
     }
 
+    /// Video frames retain the lens geometry and text-contrast hysteresis. Hidden windows
+    /// receive the latest source without spending GPU time rendering an invisible fence.
+    pub fn set_live_backdrops(&self, backdrops: Rc<BackdropSets>) {
+        self.with_view(|v| {
+            v.backdrops = backdrops;
+            v.backdrop_rect = None;
+            if desktop::is_visible(v.hwnd) {
+                v.update_backdrop();
+                if let Err(error) = v.redraw() {
+                    tracing::warn!(%error, "live wallpaper redraw failed");
+                }
+            }
+        });
+    }
+
     /// Renders and presents the shadow again even at an unchanged rect (its layered window
     /// holds the only copy of the pixels, which a display change may drop).
     pub fn repaint_shadow(&self) {
