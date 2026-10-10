@@ -2,13 +2,38 @@
 use super::*;
 use pecofence_platform::live_wallpaper::{CONTRAST_SAMPLE_FACTOR, LiveWallpaper};
 
-const FILL_DURATION: Duration = Duration::from_millis(650);
+const FILL_DURATION: Duration = Duration::from_millis(1800);
+const DRAIN_DURATION: Duration = Duration::from_millis(1600);
+
+struct OpticalTransition {
+    started: Instant,
+    from: f32,
+    velocity: f32,
+    target: f32,
+    omega: f32,
+}
+
+impl OpticalTransition {
+    fn sample(&self, now: Instant) -> (f32, f32) {
+        let t = now.saturating_duration_since(self.started).as_secs_f32();
+        let offset = self.from - self.target;
+        let b = self.velocity + self.omega * offset;
+        let decay = (-self.omega * t).exp();
+        let value = self.target + (offset + b * t) * decay;
+        let velocity = (self.velocity - self.omega * b * t) * decay;
+        if (value - self.target).abs() < 0.002 && velocity.abs() < 0.02 {
+            (self.target, 0.0)
+        } else {
+            (value.clamp(0.0, 1.0), velocity)
+        }
+    }
+}
 
 #[derive(Default)]
 struct GlassActivity {
     active: bool,
     fresh_after: Option<Instant>,
-    filling_since: Option<Instant>,
+    transition: Option<OpticalTransition>,
 }
 
 impl GlassActivity {
@@ -18,26 +43,45 @@ impl GlassActivity {
         }
         self.active = active;
         self.fresh_after = active.then_some(now);
-        self.filling_since = None;
+        if !active {
+            self.retarget(0.0, now, DRAIN_DURATION);
+        }
         true
     }
 
+    fn sample(&self, now: Instant) -> (f32, f32) {
+        self.transition
+            .as_ref()
+            .map_or((0.0, 0.0), |t| t.sample(now))
+    }
+
+    fn retarget(&mut self, target: f32, now: Instant, duration: Duration) {
+        let (from, velocity) = self.sample(now);
+        self.transition = Some(OpticalTransition {
+            started: now,
+            from,
+            velocity,
+            target,
+            omega: 6.0 / duration.as_secs_f32(),
+        });
+    }
+
     fn frame_received(&mut self, captured: Instant, now: Instant) {
-        if self.active
-            && self.filling_since.is_none()
-            && self.fresh_after.is_some_and(|after| captured >= after)
-        {
-            self.filling_since = Some(now);
+        if self.active && self.fresh_after.is_some_and(|after| captured >= after) {
+            self.fresh_after = None;
+            self.retarget(1.0, now, FILL_DURATION);
         }
     }
 
     fn strength(&self, now: Instant) -> f32 {
-        let Some(start) = self.filling_since.filter(|_| self.active) else {
-            return 0.0;
-        };
-        let t = (now.saturating_duration_since(start).as_secs_f32() / FILL_DURATION.as_secs_f32())
-            .clamp(0.0, 1.0);
-        t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+        self.sample(now).0
+    }
+
+    fn animating(&self, now: Instant) -> bool {
+        self.transition.as_ref().is_some_and(|t| {
+            let (value, velocity) = t.sample(now);
+            value != t.target || velocity != 0.0
+        })
     }
 }
 
@@ -129,7 +173,8 @@ impl App {
                 || (self.live_wallpaper.applied.is_none()
                     && now < self.live_wallpaper.bootstrap_until));
         self.live_wallpaper.worker.set_enabled(capture);
-        if capture {
+        let material_work = capture || (enabled && self.live_wallpaper.activity.animating(now));
+        if material_work {
             self.ctx.frames.request();
         }
         let strength = if enabled {
@@ -166,7 +211,7 @@ impl App {
                 if strength_changed {
                     self.redraw_live_material();
                 }
-                return capture;
+                return material_work;
             }
             // A theme/topology refresh may have installed a new static set since the last
             // frame. Track it without ever caching a video frame as a static wallpaper.
@@ -256,7 +301,7 @@ impl App {
                 let prepared = Instant::now();
                 self.apply_live_backdrops(set);
                 tracing::trace!(target: "pecofence::live_timing", prep_us = prepared.duration_since(started).as_micros(), draw_us = prepared.elapsed().as_micros(), "live wallpaper apply");
-                return capture;
+                return material_work;
             }
         }
         if self
@@ -302,7 +347,7 @@ impl App {
         if strength_changed {
             self.redraw_live_material();
         }
-        capture
+        material_work
     }
 
     fn redraw_live_material(&self) {
@@ -321,11 +366,12 @@ impl App {
 
     pub(super) fn live_render_state(&self) -> String {
         format!(
-            "active={} strength={:.3} fps={} has_live={}",
+            "active={} strength={:.3} fps={} has_live={} animating={}",
             self.live_wallpaper.activity.active,
             self.live_wallpaper.strength,
             self.live_wallpaper.worker.fps,
-            self.live_wallpaper.applied.is_some()
+            self.live_wallpaper.applied.is_some(),
+            self.live_wallpaper.activity.animating(Instant::now())
         )
     }
 
@@ -381,12 +427,40 @@ mod tests {
         assert_eq!(activity.strength(now + FILL_DURATION), 0.0);
         activity.frame_received(now, now);
         assert_eq!(activity.strength(now), 0.0);
-        assert!((activity.strength(now + FILL_DURATION / 2) - 0.5).abs() < 0.001);
-        assert_eq!(activity.strength(now + FILL_DURATION), 1.0);
-        assert!(activity.strength(now + Duration::from_millis(16)) < 0.001);
-        assert!(activity.set_active(false, now + FILL_DURATION));
-        assert_eq!(activity.strength(now + FILL_DURATION), 0.0);
-        assert!(activity.set_active(true, now + FILL_DURATION));
-        assert_eq!(activity.strength(now + FILL_DURATION * 2), 0.0);
+        assert!(activity.strength(now + Duration::from_millis(650)) < 0.7);
+        assert!(activity.strength(now + FILL_DURATION) > 0.95);
+        let settled = now + FILL_DURATION * 2;
+        assert_eq!(activity.strength(settled), 1.0);
+        assert!(!activity.animating(settled));
+        assert!(activity.set_active(false, settled));
+        assert_eq!(activity.strength(settled), 1.0);
+        assert!(activity.strength(settled + DRAIN_DURATION / 2) < 0.3);
+        assert_eq!(activity.strength(settled + DRAIN_DURATION * 2), 0.0);
+        assert!(!activity.animating(settled + DRAIN_DURATION * 2));
+    }
+
+    #[test]
+    fn reversal_keeps_the_current_strength_and_velocity_without_restarting() {
+        let now = Instant::now();
+        let mut activity = GlassActivity::default();
+        activity.set_active(true, now);
+        activity.frame_received(now, now);
+        let switched = now + Duration::from_millis(650);
+        let before = activity.sample(switched);
+        activity.set_active(false, switched);
+        let after = activity.sample(switched);
+        assert!((before.0 - after.0).abs() < 0.00001);
+        assert!((before.1 - after.1).abs() < 0.00001);
+        assert!(activity.animating(switched));
+        let back = switched + Duration::from_millis(100);
+        activity.set_active(true, back);
+        let waiting = activity.sample(back);
+        activity.frame_received(back - Duration::from_millis(1), back);
+        assert_eq!(activity.sample(back), waiting);
+        activity.frame_received(back, back);
+        let resumed = activity.sample(back);
+        assert!((resumed.0 - waiting.0).abs() < 0.00001);
+        assert!((resumed.1 - waiting.1).abs() < 0.00001);
+        assert_eq!(activity.strength(back + FILL_DURATION * 2), 1.0);
     }
 }

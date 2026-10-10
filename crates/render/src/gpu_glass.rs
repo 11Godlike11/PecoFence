@@ -236,6 +236,9 @@ struct Effects {
     position: b::ID2D1Effect,
     displace: b::ID2D1Effect,
     blur: b::ID2D1Effect,
+    resting_blur: b::ID2D1Effect,
+    crossfade: b::ID2D1Effect,
+    composite: b::ID2D1Effect,
     soft_displace: b::ID2D1Effect,
     frost: b::ID2D1Effect,
     rim: b::ID2D1Effect,
@@ -286,6 +289,13 @@ impl Effects {
             b::D2D1_BORDER_MODE_HARD,
         )?;
         let soft_displace = effect(&b::CLSID_D2D1DisplacementMap)?;
+        let resting_blur = effect(&b::CLSID_D2D1GaussianBlur)?;
+        enumeration(
+            &resting_blur,
+            b::D2D1_GAUSSIANBLUR_PROP_BORDER_MODE,
+            b::D2D1_BORDER_MODE_HARD,
+        )?;
+        let crossfade = effect(&b::CLSID_D2D1CrossFade)?;
         enumeration(
             &soft_displace,
             b::D2D1_DISPLACEMENTMAP_PROP_X_CHANNEL_SELECT,
@@ -312,6 +322,7 @@ impl Effects {
             position.SetInput(0, &border.GetOutput()?, true);
             displace.SetInput(0, &position.GetOutput()?, true);
             blur.SetInput(0, &position.GetOutput()?, true);
+            resting_blur.SetInput(0, &position.GetOutput()?, true);
             soft_displace.SetInput(0, &blur.GetOutput()?, true);
             frost.SetInput(0, &soft_displace.GetOutput()?, true);
             light.SetInput(0, &displace.GetOutput()?, true);
@@ -321,6 +332,8 @@ impl Effects {
             composite.SetInput(1, &frost.GetOutput()?, true);
             composite.SetInput(2, &shade.GetOutput()?, true);
             composite.SetInput(3, &rim.GetOutput()?, true);
+            crossfade.SetInput(0, &resting_blur.GetOutput()?, true);
+            crossfade.SetInput(1, &composite.GetOutput()?, true);
             mask.SetInput(0, &composite.GetOutput()?, true);
             output.SetInput(0, &mask.GetOutput()?, true);
         }
@@ -330,6 +343,9 @@ impl Effects {
             position,
             displace,
             blur,
+            resting_blur,
+            crossfade,
+            composite,
             soft_displace,
             frost,
             rim,
@@ -462,6 +478,11 @@ impl Effects {
         self.geometry = Some(key);
         self.displacement_px = field.scale_px;
         self.blur_px = field.blur_px;
+        scalar(
+            &self.resting_blur,
+            b::D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
+            8.0 * scale,
+        )?;
         self.optical_strength = None;
         Ok(true)
     }
@@ -483,11 +504,28 @@ impl Effects {
         scalar(
             &self.blur,
             b::D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
-            self.blur_px * strength,
+            self.blur_px,
         )?;
         let mut contour = [0.0; 20];
         contour[15] = CONTOUR_OPACITY * strength;
         color_matrix(&self.shade, contour)?;
+        scalar(
+            &self.crossfade,
+            b::D2D1_CROSSFADE_PROP_WEIGHT,
+            1.0 - strength,
+        )?;
+        // Endpoints bypass the unused branch: the idle material is plain Gaussian
+        // blur, and normal live glass pays no crossfade or second blur cost.
+        unsafe {
+            let input = if strength == 0.0 {
+                self.resting_blur.GetOutput()?
+            } else if strength == 1.0 {
+                self.composite.GetOutput()?
+            } else {
+                self.crossfade.GetOutput()?
+            };
+            self.mask.SetInput(0, &input, true);
+        }
         self.optical_strength = Some(strength.to_bits());
         Ok(())
     }

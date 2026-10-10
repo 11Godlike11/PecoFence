@@ -137,14 +137,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 255,
                 "pause must retain opaque real wallpaper"
             );
-            if strength == 0.0 {
-                assert!(
-                    pixels[centre] <= 1 && pixels[centre + 4] >= 254,
-                    "paused optics must leave wallpaper sharp"
-                );
-            } else if strength == 1.0 {
-                assert!((pixels[centre] as i32 - 128).abs() <= 2);
-            }
+            assert!((pixels[centre] as i32 - 128).abs() <= 2);
         }
         assert_eq!(
             renderer.stats().map_builds,
@@ -152,7 +145,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "filling must reuse geometry"
         );
         assert_eq!(cache.uploads, 1, "filling must reuse the source upload");
-        println!("paused sharp wallpaper and progressive optics restoration passed");
+        let mut bars = Image::solid(800, 500, [0; 3]);
+        for (i, pixel) in bars.bgra.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            pixel[..3].fill(if (i % 800 / 32) % 2 == 0 { 0 } else { 255 });
+        }
+        let bars = source(bars);
+        let mut samples = Vec::new();
+        for strength in [0.0, 0.25, 0.5, 1.0, 0.0] {
+            renderer.set_strength(strength);
+            target.draw(|s| {
+                s.clear(ColorF::TRANSPARENT);
+                renderer.draw(
+                    s,
+                    &mut cache,
+                    &bars,
+                    [-200, 80, 260, 160],
+                    0.0,
+                    1.0,
+                    24.0,
+                    1.0,
+                    0.0,
+                )
+            })?;
+            let pixels = target.read_pixels()?;
+            assert_eq!(pixels[centre + 3], 255);
+            samples.push(pixels[centre]);
+        }
+        assert!(
+            samples[0] > 50 && samples[0] < 200,
+            "resting blur: {samples:?}"
+        );
+        assert!(
+            samples[3] > 235,
+            "normal glass must retain its original detail: {samples:?}"
+        );
+        assert!(
+            samples[..4].windows(2).all(|v| v[0] < v[1]),
+            "crossfade direction: {samples:?}"
+        );
+        assert_eq!(
+            samples[0], samples[4],
+            "resting endpoint must restore exactly"
+        );
+        assert_eq!(renderer.stats().map_builds, 1);
+        assert_eq!(cache.uploads, 2);
+        renderer.set_strength(1.0);
+        println!("static resting blur and progressive optics crossfade passed: {samples:?}");
         for (i, pixel) in ramp.bgra.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             pixel[..3].fill((i % 800 / 4) as u8);
         }
@@ -187,7 +225,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         assert_eq!(renderer.stats().map_builds, 1);
         assert_eq!(
-            cache.uploads, 2,
+            cache.uploads, 3,
             "wallpaper refresh must upload only the changed source"
         );
         println!("neutral frost, source refresh and negative desktop coordinates passed");

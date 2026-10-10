@@ -1,7 +1,7 @@
 # Wallpaper Engine personal build
 
 This fork adds live Wallpaper Engine backgrounds to **Liquid Glass**. Version
-`0.1.5-we.7` is based on upstream PecoFence 0.1.5. The GPU optics now use
+`0.1.5-we.8` is based on upstream PecoFence 0.1.5. The GPU optics now use
 continuous superellipse corners, a flat face, curved edge displacement, subtle
 interior frost and narrow directional glints. The material and Windows compositor
 clip share the same silhouette. Whole-face magnification and the previous broad
@@ -47,12 +47,15 @@ maximized/full-screen applications, the glass keeps the current paused frame.
 - Live updates share the compositor frame clock with fence animations. A 100 ms
   fallback poll detects returning focus; there is no competing 60 Hz UI timer.
 - Switching to another application, including a full-screen application, suspends
-  live capture and sets optical strength to zero. The last real WPE frame stays
-  in the material, with sharp pixels and no refraction, blur or glints. Focus loss
+  live capture immediately and gradually replaces liquid optics with a static
+  8 DIP Gaussian blur of the last real WPE frame. At rest this bypasses refraction,
+  contour and glints, and has no recurring material redraws. Focus loss
   never restores the Windows native wallpaper. Startup primes one real WPE frame
   even when the app starts behind another window.
 - Returning to the desktop waits for a newly captured frame, then restores optical
-  strength with a 650 ms smootherstep ramp. A second focus loss cancels that ramp.
+  strength with a slow critically damped transition. Incoming/outgoing response
+  parameters are 1.8/1.6 seconds, with subtle tails settling at roughly 2.6/2.3
+  seconds. A second focus change retargets current strength and velocity smoothly.
   PecoFence popups and an explicitly requested Peek remain interactive; a full-screen
   PecoFence window also suspends ordinary desktop rendering.
 - Set `PECOFENCE_LIVE_WALLPAPER=0` before starting to use the original static

@@ -1,4 +1,4 @@
-# Personal Liquid Glass renderer (we.7)
+# Personal Liquid Glass renderer (we.8)
 
 This is a Windows Direct2D approximation of Apple's material, not Apple's shader
 or a demonstrated pixel-perfect reproduction. The current renderer was rebuilt
@@ -52,9 +52,18 @@ at fractional DPI and odd dimensions within one alpha value. Shadow templates ar
 large enough to reach the settled corner order too, and are compared with direct
 rendering at full, intermediate and capsule heights.
 
-Optical strength scales GPU displacement, blur, contour and glints without rebuilding
-geometry or replacing the real wallpaper. Zero strength leaves a sharp opaque source.
-Restoration uses a 650 ms smootherstep after the first fresh capture. The expanded
+Optical strength scales GPU displacement, contour and glints without rebuilding
+geometry or replacing the real wallpaper. In we.8, zero strength is an 8 DIP Gaussian
+blur of the retained WPE frame. A Direct2D
+[CrossFade effect](https://learn.microsoft.com/en-us/windows/win32/direct2d/cross-fade-effect)
+blends that resting material into live liquid optics. Both endpoints bypass the unused
+effect branch; full-strength glass keeps the previous detail and rendering cost.
+After focus loss capture stops immediately, while the material drains smoothly over
+the existing compositor clock. Once settled there are no recurring material draws.
+Restoration waits for the first fresh capture. Critically damped transitions use
+1.8 second incoming / 1.6 second outgoing response parameters (omega = 6/response),
+settling in roughly 2.6/2.3 seconds. Reversal inherits current strength and velocity.
+The expanded
 content raster is retained while folded and repainted only when invalidated or its
 adaptive ink changes; folding no longer reallocates it as a one-pixel surface.
 
@@ -121,3 +130,13 @@ median was 6.218 -> 4.771 ms, p95 10.575 -> 8.240 ms and maximum
 each resize, not end-to-end display latency. Native cache checks additionally
 verified that reopening reuses the full content surface and changing width while
 folded causes exactly one content redraw on expansion.
+
+For we.8, real GPU output over 32-pixel bars produced centre samples
+193/208/224/255 at strengths 0/0.25/0.5/1, returning exactly to 193 on suspension.
+The same geometry and source upload were reused throughout. One-pixel checker
+detail remained neutral and opaque, and the existing GPU opacity, coordinate,
+multi-monitor, device-reset and control tests passed. Unit tests cover fresh-frame
+gating, slower restoration, outgoing settling and continuity of strength/velocity
+on reversal. Native-window checks observed incoming strengths 0.030/0.587/1.0
+and outgoing strengths 0.823/0.184/0.0. After settling, successive paused dumps
+had identical GPU frame and wallpaper-upload counters and no material animation.
