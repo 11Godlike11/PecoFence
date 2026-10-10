@@ -1,4 +1,4 @@
-# Personal Liquid Glass renderer (we.8)
+# Personal Liquid Glass renderer (we.9)
 
 This is a Windows Direct2D approximation of Apple's material, not Apple's shader
 or a demonstrated pixel-perfect reproduction. The current renderer was rebuilt
@@ -53,11 +53,11 @@ large enough to reach the settled corner order too, and are compared with direct
 rendering at full, intermediate and capsule heights.
 
 Optical strength scales GPU displacement, contour and glints without rebuilding
-geometry or replacing the real wallpaper. In we.8, zero strength is an 8 DIP Gaussian
-blur of the retained WPE frame. A Direct2D
-[CrossFade effect](https://learn.microsoft.com/en-us/windows/win32/direct2d/cross-fade-effect)
-blends that resting material into live liquid optics. Both endpoints bypass the unused
-effect branch; full-strength glass keeps the previous detail and rendering cost.
+geometry or replacing the real wallpaper. In we.9, strength also controls actual
+material alpha. Zero strength skips glass drawing and uploads entirely: Windows
+composites the real animated desktop through the window. Only a 3.5% white wash
+remains under the title and icons. The we.8 frozen Gaussian/CrossFade branch was
+removed. Full-strength glass retains its original optical model.
 After focus loss capture stops immediately, while the material drains smoothly over
 the existing compositor clock. Once settled there are no recurring material draws.
 Restoration waits for the first fresh capture. Critically damped transitions use
@@ -66,6 +66,15 @@ settling in roughly 2.6/2.3 seconds. Reversal inherits current strength and velo
 The expanded
 content raster is retained while folded and repainted only when invalidated or its
 adaptive ink changes; folding no longer reallocates it as a one-pixel surface.
+
+In we.9, expansion starts its 320 ms finite Hermite height motion only after content
+raster preparation; collapse takes 240 ms. A fresh motion responds with a finite
+initial velocity and decelerates to zero, while reversal inherits the sampled height
+velocity. Chevron motion uses the same interpolation and duration. Content fade
+uses the same time window instead of an independent 83 ms flash. Unchanged rounded
+pixel heights do not send SetWindowPos. During height motion, incoming live frames
+and optical strength update the stored material without immediately drawing it a
+second time; the height pass presents it on its next frame.
 
 ## Sources and attribution
 
@@ -140,3 +149,16 @@ gating, slower restoration, outgoing settling and continuity of strength/velocit
 on reversal. Native-window checks observed incoming strengths 0.030/0.587/1.0
 and outgoing strengths 0.823/0.184/0.0. After settling, successive paused dumps
 had identical GPU frame and wallpaper-upload counters and no material animation.
+
+For we.9, GPU regression samples have alpha 0/64/127/255 at strengths
+0/0.25/0.5/1. At zero strength, two different underlying target colors pass through
+unchanged, with no extra glass frames, maps or uploads. Native tests cover focus
+restoration during expansion, interruption, settled idle counters, retained content
+rasters, folded width changes and repeated fold reversal. The latter ended at the
+correct 700 x 1000 window size without another content redraw. Eight motion tests
+passed, including finite endpoint, immediate first-frame response and velocity
+continuity at reversal. Paired release runs completed six fold/unfold cycles each;
+the old open started at 46 px from a 45 px shelf, while the new first presented
+heights were 55–73 px. Maximum inter-resize gaps for the new opens were 13.02–16.81
+ms. These are local HWND/update timings, not display-frame or perceived-smoothness
+guarantees.

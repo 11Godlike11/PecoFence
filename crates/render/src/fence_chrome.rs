@@ -609,6 +609,17 @@ fn draw_plate(
                 let mut c = theme.glass_layer_fill;
                 c.a *= opacity.min(1.0) * plate_a;
                 material.borrow().draw_layer(session, c)?;
+                let strength = material.borrow().strength();
+                if strength < 1.0 {
+                    let wash = session.create_solid_brush(ColorF::new(
+                        1.0,
+                        1.0,
+                        1.0,
+                        0.035 * (1.0 - strength) * plate_a,
+                    ))?;
+                    // The root's continuous clip supplies the exact outer silhouette.
+                    session.fill_rect(&outer, &wash);
+                }
             }
         }
         Backdrop::MicaLike(crop) if crop.image.width > 0 && crop.image.height > 0 => {

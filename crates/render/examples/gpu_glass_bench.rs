@@ -132,12 +132,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
             })?;
             let pixels = target.read_pixels()?;
-            assert_eq!(
-                pixels[centre + 3],
-                255,
-                "pause must retain opaque real wallpaper"
-            );
-            assert!((pixels[centre] as i32 - 128).abs() <= 2);
+            assert!((pixels[centre + 3] as f32 - 255.0 * strength).abs() <= 1.0);
+            assert!(pixels[centre] <= pixels[centre + 3]);
+            if strength == 0.0 {
+                assert_eq!(&pixels[centre..centre + 4], &[0; 4]);
+            } else if strength == 1.0 {
+                assert!((pixels[centre] as i32 - 128).abs() <= 2);
+            }
         }
         assert_eq!(
             renderer.stats().map_builds,
@@ -168,12 +169,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
             })?;
             let pixels = target.read_pixels()?;
-            assert_eq!(pixels[centre + 3], 255);
+            assert!((pixels[centre + 3] as f32 - 255.0 * strength).abs() <= 1.0);
             samples.push(pixels[centre]);
         }
         assert!(
-            samples[0] > 50 && samples[0] < 200,
-            "resting blur: {samples:?}"
+            samples[0] == 0,
+            "inactive material must be transparent: {samples:?}"
         );
         assert!(
             samples[3] > 235,
@@ -189,8 +190,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         assert_eq!(renderer.stats().map_builds, 1);
         assert_eq!(cache.uploads, 2);
+        let idle_stats = renderer.stats();
+        for color in [
+            ColorF::new(0.8, 0.2, 0.1, 1.0),
+            ColorF::new(0.1, 0.2, 0.8, 1.0),
+        ] {
+            target.draw(|s| {
+                s.clear(color);
+                renderer.draw(
+                    s,
+                    &mut cache,
+                    &bars,
+                    [-200, 80, 260, 160],
+                    0.0,
+                    1.0,
+                    24.0,
+                    1.0,
+                    0.0,
+                )?;
+                renderer.draw_layer(s, ColorF::new(1.0, 1.0, 1.0, 0.4))
+            })?;
+            let pixels = target.read_pixels()?;
+            let expected = [color.b, color.g, color.r];
+            for (v, expected) in pixels[centre..centre + 3].iter().zip(expected) {
+                assert!((*v as f32 - expected * 255.0).abs() <= 1.0);
+            }
+        }
+        assert_eq!(renderer.stats().frames, idle_stats.frames);
+        assert_eq!(renderer.stats().map_builds, idle_stats.map_builds);
+        assert_eq!(cache.uploads, 2);
         renderer.set_strength(1.0);
-        println!("static resting blur and progressive optics crossfade passed: {samples:?}");
+        println!(
+            "transparent idle material passes changing backgrounds without GPU glass draws: {samples:?}"
+        );
         for (i, pixel) in ramp.bgra.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             pixel[..3].fill((i % 800 / 4) as u8);
         }

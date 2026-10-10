@@ -236,9 +236,6 @@ struct Effects {
     position: b::ID2D1Effect,
     displace: b::ID2D1Effect,
     blur: b::ID2D1Effect,
-    resting_blur: b::ID2D1Effect,
-    crossfade: b::ID2D1Effect,
-    composite: b::ID2D1Effect,
     soft_displace: b::ID2D1Effect,
     frost: b::ID2D1Effect,
     rim: b::ID2D1Effect,
@@ -289,13 +286,6 @@ impl Effects {
             b::D2D1_BORDER_MODE_HARD,
         )?;
         let soft_displace = effect(&b::CLSID_D2D1DisplacementMap)?;
-        let resting_blur = effect(&b::CLSID_D2D1GaussianBlur)?;
-        enumeration(
-            &resting_blur,
-            b::D2D1_GAUSSIANBLUR_PROP_BORDER_MODE,
-            b::D2D1_BORDER_MODE_HARD,
-        )?;
-        let crossfade = effect(&b::CLSID_D2D1CrossFade)?;
         enumeration(
             &soft_displace,
             b::D2D1_DISPLACEMENTMAP_PROP_X_CHANNEL_SELECT,
@@ -322,7 +312,6 @@ impl Effects {
             position.SetInput(0, &border.GetOutput()?, true);
             displace.SetInput(0, &position.GetOutput()?, true);
             blur.SetInput(0, &position.GetOutput()?, true);
-            resting_blur.SetInput(0, &position.GetOutput()?, true);
             soft_displace.SetInput(0, &blur.GetOutput()?, true);
             frost.SetInput(0, &soft_displace.GetOutput()?, true);
             light.SetInput(0, &displace.GetOutput()?, true);
@@ -332,8 +321,6 @@ impl Effects {
             composite.SetInput(1, &frost.GetOutput()?, true);
             composite.SetInput(2, &shade.GetOutput()?, true);
             composite.SetInput(3, &rim.GetOutput()?, true);
-            crossfade.SetInput(0, &resting_blur.GetOutput()?, true);
-            crossfade.SetInput(1, &composite.GetOutput()?, true);
             mask.SetInput(0, &composite.GetOutput()?, true);
             output.SetInput(0, &mask.GetOutput()?, true);
         }
@@ -343,9 +330,6 @@ impl Effects {
             position,
             displace,
             blur,
-            resting_blur,
-            crossfade,
-            composite,
             soft_displace,
             frost,
             rim,
@@ -478,11 +462,6 @@ impl Effects {
         self.geometry = Some(key);
         self.displacement_px = field.scale_px;
         self.blur_px = field.blur_px;
-        scalar(
-            &self.resting_blur,
-            b::D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
-            8.0 * scale,
-        )?;
         self.optical_strength = None;
         Ok(true)
     }
@@ -504,28 +483,11 @@ impl Effects {
         scalar(
             &self.blur,
             b::D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
-            self.blur_px,
+            self.blur_px * strength,
         )?;
         let mut contour = [0.0; 20];
         contour[15] = CONTOUR_OPACITY * strength;
         color_matrix(&self.shade, contour)?;
-        scalar(
-            &self.crossfade,
-            b::D2D1_CROSSFADE_PROP_WEIGHT,
-            1.0 - strength,
-        )?;
-        // Endpoints bypass the unused branch: the idle material is plain Gaussian
-        // blur, and normal live glass pays no crossfade or second blur cost.
-        unsafe {
-            let input = if strength == 0.0 {
-                self.resting_blur.GetOutput()?
-            } else if strength == 1.0 {
-                self.composite.GetOutput()?
-            } else {
-                self.crossfade.GetOutput()?
-            };
-            self.mask.SetInput(0, &input, true);
-        }
         self.optical_strength = Some(strength.to_bits());
         Ok(())
     }
@@ -578,6 +540,10 @@ impl GpuGlass {
         };
         let Some((w, h, _, _)) = effects.geometry else {
             return Ok(());
+        };
+        let color = windows_canvas::ColorF {
+            a: color.a * self.strength(),
+            ..color
         };
         if color.a <= 0.0 {
             return Ok(());
@@ -638,6 +604,9 @@ impl GpuGlass {
         opacity: f32,
         hover: f32,
     ) -> Result<()> {
+        if self.strength() == 0.0 {
+            return Ok(());
+        }
         if self.failed {
             return Err(windows_core::Error::from_hresult(windows_core::HRESULT(
                 0x80004005u32 as i32,
@@ -702,7 +671,7 @@ impl GpuGlass {
         let Some(parent) = self.effects.as_ref().filter(|_| !self.failed) else {
             return Ok(false);
         };
-        if rect.width() <= 0.0 || rect.height() <= 0.0 || opacity <= 0.0 {
+        if rect.width() <= 0.0 || rect.height() <= 0.0 || opacity <= 0.0 || self.strength() == 0.0 {
             return Ok(true);
         }
         let context: b::ID2D1DeviceContext = session.raw().cast()?;
@@ -776,7 +745,9 @@ impl GpuGlass {
             control
                 .brush
                 .SetTransform(&windows_numerics::Matrix3x2::translation(x, y));
-            control.brush.SetOpacity(opacity.clamp(0.0, 1.0));
+            control
+                .brush
+                .SetOpacity(opacity.clamp(0.0, 1.0) * self.strength.unwrap_or(1.0));
             context.FillRoundedRectangle(&round, &control.brush);
         }
         session.set_transform(&saved);
@@ -821,7 +792,7 @@ impl GpuGlass {
             &effects.position,
             [1.0, 0.0, 0.0, 1.0, -rect[0] as f32, -rect[1] as f32],
         )?;
-        let opacity = opacity.clamp(0.0, 1.0);
+        let opacity = opacity.clamp(0.0, 1.0) * self.strength.unwrap_or(1.0);
         if effects.opacity != Some(opacity.to_bits()) {
             let mut values = [0.0; 20];
             for i in [0, 5, 10, 15] {

@@ -1395,7 +1395,7 @@ impl FenceWindow {
         self.with_view(|v| {
             v.backdrops = backdrops;
             v.backdrop_rect = None;
-            if desktop::is_visible(v.hwnd) {
+            if desktop::is_visible(v.hwnd) && !v.height_animating() {
                 let old_ink = v.material_foreground().text_primary;
                 v.update_backdrop();
                 let changed_ink = old_ink != v.material_foreground().text_primary;
@@ -1414,7 +1414,7 @@ impl FenceWindow {
     pub fn set_live_glass_strength(&self, strength: f32, redraw: bool) {
         self.with_view(|v| {
             v.gpu_glass.borrow_mut().set_strength(strength);
-            if redraw && desktop::is_visible(v.hwnd) {
+            if redraw && desktop::is_visible(v.hwnd) && !v.height_animating() {
                 let _ = v.redraw_chrome_only();
             }
         });

@@ -8,8 +8,6 @@ pub const CLSID_D2D1ColorMatrix: windows_core::GUID =
     windows_core::GUID::from_u128(0x921f03d6_641c_47df_852d_b4bb6153ae11);
 pub const CLSID_D2D1Composite: windows_core::GUID =
     windows_core::GUID::from_u128(0x48fc9f51_f6ac_48f1_8b58_3b28ac46f76d);
-pub const CLSID_D2D1CrossFade: windows_core::GUID =
-    windows_core::GUID::from_u128(0x12f575e8_4db1_485f_9a84_03a07dd3829f);
 pub const CLSID_D2D1DisplacementMap: windows_core::GUID =
     windows_core::GUID::from_u128(0xedc48364_0417_4111_9450_43845fa9f890);
 pub const CLSID_D2D1GaussianBlur: windows_core::GUID =
@@ -81,8 +79,6 @@ pub type D2D1_COLOR_SPACE = i32;
 pub type D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS = u32;
 pub type D2D1_COMPOSITE_MODE = i32;
 pub const D2D1_COMPOSITE_MODE_SOURCE_OVER: D2D1_COMPOSITE_MODE = 0;
-pub type D2D1_CROSSFADE_PROP = i32;
-pub const D2D1_CROSSFADE_PROP_WEIGHT: D2D1_CROSSFADE_PROP = 0;
 pub type D2D1_DEVICE_CONTEXT_OPTIONS = u32;
 pub type D2D1_DISPLACEMENTMAP_PROP = i32;
 pub const D2D1_DISPLACEMENTMAP_PROP_SCALE: D2D1_DISPLACEMENTMAP_PROP = 0;

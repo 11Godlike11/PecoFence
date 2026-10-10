@@ -67,7 +67,10 @@ impl FenceViewState {
             }
             more |= self.content_busy;
         }
-        if self.chrome_busy && draw_chrome {
+        let rolling_live_glass = self.height_animating()
+            && self.theme.liquid_glass
+            && self.gpu_glass.borrow().strength() > 0.0;
+        if draw_chrome && (self.chrome_busy || rolling_live_glass) {
             let _ = self.draw_chrome_panel();
             more |= self.chrome_busy;
         }
@@ -93,7 +96,13 @@ impl FenceWindow {
                 .as_ref()
                 .map(|a| (a.height, Some(a.rolled_at_end)))
                 .or_else(|| v.height_anim.map(|t| (t, None)))
-                .map(|(t, rolled)| (t.value_at(now).round() as i32, t.is_done(now), rolled));
+                .map(|(t, rolled)| {
+                    (
+                        (t.value_at(now).round() as i32).max(v.title_h_px()),
+                        t.is_done(now),
+                        rolled,
+                    )
+                });
             // If height changes, WM_SIZE will render the new chrome. Drawing hover
             // feedback here would first publish the same frame at the previous height.
             let draw_chrome =
@@ -107,7 +116,9 @@ impl FenceWindow {
             return more;
         };
         let r = window::window_rect(hwnd);
-        let _ = window::set_window_bounds(hwnd, r.left, r.top, r.right - r.left, h);
+        if h != r.bottom - r.top {
+            let _ = window::set_window_bounds(hwnd, r.left, r.top, r.right - r.left, h);
+        }
         if !done {
             return true;
         }
