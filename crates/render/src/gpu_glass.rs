@@ -215,31 +215,18 @@ pub struct Stats {
     pub control_map_builds: u64,
 }
 
-/// Broad neutral reflections and a restrained underside shade reveal the rounded cap.
-const RIM_SATURATION: f32 = 1.0;
-const RIM_TINT_OPACITY: f32 = 0.06;
-const RIM_LIGHT: f32 = 0.24;
-const SHOULDER_BOUNCE: f32 = 0.045;
+/// Thin chroma-preserving glints; contact shading stays confined to the edge.
+const RIM_LIGHT: f32 = 0.28;
+const CONTOUR_OPACITY: f32 = 0.055;
 
-/// feColorMatrix `saturate` (Rec. 709 luma weights) in D2D's input-row layout.
-fn saturation_matrix(s: f32) -> [f32; 20] {
-    let luma = [0.213, 0.715, 0.072];
+/// Recolor sampled wallpaper for glints, preserving chroma with a limited lift.
+fn glint_matrix(level: f32) -> [f32; 20] {
     let mut values = [0.0; 20];
-    for input in 0..3 {
-        for output in 0..3 {
-            values[input * 4 + output] =
-                luma[input] * (1.0 - s) + if input == output { s } else { 0.0 };
-        }
+    for diagonal in [0, 5, 10] {
+        values[diagonal] = 0.45 * level;
     }
-    values[15] = 1.0;
-    values
-}
-
-/// Premultiplied white from the ring's alpha, scaled by `level`. `color_matrix` applies
-/// the matrix to premultiplied values, so colour must come from alpha, not an offset.
-fn light_matrix(level: f32) -> [f32; 20] {
-    let mut values = [0.0; 20];
-    values[12..16].fill(level);
+    values[12..15].fill(0.95 * level);
+    values[15] = level;
     values
 }
 
@@ -248,10 +235,15 @@ struct Effects {
     border: b::ID2D1Effect,
     position: b::ID2D1Effect,
     displace: b::ID2D1Effect,
+    blur: b::ID2D1Effect,
+    soft_displace: b::ID2D1Effect,
+    frost: b::ID2D1Effect,
     rim: b::ID2D1Effect,
     light: b::ID2D1Effect,
     shade: b::ID2D1Effect,
     output: b::ID2D1Effect,
+    layer: b::ID2D1Effect,
+    mask: b::ID2D1Effect,
     surface: Rc<Wallpaper>,
     geometry: Option<(u32, u32, u32, u32)>,
     opacity: Option<u32>,
@@ -284,51 +276,67 @@ impl Effects {
             b::D2D1_DISPLACEMENTMAP_PROP_Y_CHANNEL_SELECT,
             b::D2D1_CHANNEL_SELECTOR_G,
         )?;
-        let saturate = effect(&b::CLSID_D2D1ColorMatrix)?;
-        let mut rim_tint = saturation_matrix(RIM_SATURATION);
-        // Scale premultiplied colour and alpha together so the reflection cannot whiten
-        // or saturate the shoulder when its opacity is reduced.
-        rim_tint.iter_mut().for_each(|v| *v *= RIM_TINT_OPACITY);
-        color_matrix(&saturate, rim_tint)?;
-        property(
-            &saturate,
-            b::D2D1_COLORMATRIX_PROP_CLAMP_OUTPUT,
-            b::D2D1_PROPERTY_TYPE_BOOL,
-            &1u32,
+        let blur = effect(&b::CLSID_D2D1GaussianBlur)?;
+        enumeration(
+            &blur,
+            b::D2D1_GAUSSIANBLUR_PROP_BORDER_MODE,
+            b::D2D1_BORDER_MODE_HARD,
         )?;
-        // Input 1 (the ring) arrives with the geometry.
+        let soft_displace = effect(&b::CLSID_D2D1DisplacementMap)?;
+        enumeration(
+            &soft_displace,
+            b::D2D1_DISPLACEMENTMAP_PROP_X_CHANNEL_SELECT,
+            b::D2D1_CHANNEL_SELECTOR_R,
+        )?;
+        enumeration(
+            &soft_displace,
+            b::D2D1_DISPLACEMENTMAP_PROP_Y_CHANNEL_SELECT,
+            b::D2D1_CHANNEL_SELECTOR_G,
+        )?;
+        let frost = effect(&b::CLSID_D2D1AlphaMask)?;
         let rim = effect(&b::CLSID_D2D1AlphaMask)?;
         let light = effect(&b::CLSID_D2D1ColorMatrix)?;
-        color_matrix(&light, light_matrix(RIM_LIGHT))?;
+        color_matrix(&light, glint_matrix(RIM_LIGHT))?;
         let shade = effect(&b::CLSID_D2D1ColorMatrix)?;
-        // Back-facing glass receives weak white bounce light instead of a black overlay.
-        // The refraction supplies the thickness; it must not turn clear glass into smoke.
-        color_matrix(&shade, light_matrix(SHOULDER_BOUNCE))?;
+        let mut contour = [0.0; 20];
+        contour[15] = CONTOUR_OPACITY;
+        color_matrix(&shade, contour)?;
         let composite = effect(&b::CLSID_D2D1Composite)?;
+        let mask = effect(&b::CLSID_D2D1AlphaMask)?;
         let output = effect(&b::CLSID_D2D1ColorMatrix)?;
+        let layer = effect(&b::CLSID_D2D1ColorMatrix)?;
         unsafe {
             position.SetInput(0, &border.GetOutput()?, true);
             displace.SetInput(0, &position.GetOutput()?, true);
-            saturate.SetInput(0, &displace.GetOutput()?, true);
-            rim.SetInput(0, &saturate.GetOutput()?, true);
+            blur.SetInput(0, &position.GetOutput()?, true);
+            soft_displace.SetInput(0, &blur.GetOutput()?, true);
+            frost.SetInput(0, &soft_displace.GetOutput()?, true);
+            light.SetInput(0, &displace.GetOutput()?, true);
+            rim.SetInput(0, &light.GetOutput()?, true);
             composite.SetInputCount(4).ok()?;
             composite.SetInput(0, &displace.GetOutput()?, true);
-            composite.SetInput(1, &rim.GetOutput()?, true);
-            composite.SetInput(2, &light.GetOutput()?, true);
-            composite.SetInput(3, &shade.GetOutput()?, true);
-            output.SetInput(0, &composite.GetOutput()?, true);
+            composite.SetInput(1, &frost.GetOutput()?, true);
+            composite.SetInput(2, &shade.GetOutput()?, true);
+            composite.SetInput(3, &rim.GetOutput()?, true);
+            mask.SetInput(0, &composite.GetOutput()?, true);
+            output.SetInput(0, &mask.GetOutput()?, true);
         }
         Ok(Self {
             source: None,
             border,
             position,
             displace,
+            blur,
+            soft_displace,
+            frost,
             rim,
             light,
             shade,
             output,
+            layer,
+            mask: mask.clone(),
             surface: Rc::new(Wallpaper {
-                image: unsafe { composite.GetOutput()? },
+                image: unsafe { mask.GetOutput()? },
             }),
             geometry: None,
             opacity: None,
@@ -400,18 +408,50 @@ impl Effects {
             b::DXGI_FORMAT_A8_UNORM,
         )?
         .cast::<b::ID2D1Image>()?;
+        let coverage = bitmap(
+            context,
+            w,
+            h,
+            field.coverage.as_ptr().cast(),
+            w,
+            b::DXGI_FORMAT_A8_UNORM,
+        )?
+        .cast::<b::ID2D1Image>()?;
+        let frost = bitmap(
+            context,
+            w,
+            h,
+            field.frost.as_ptr().cast(),
+            w,
+            b::DXGI_FORMAT_A8_UNORM,
+        )?
+        .cast::<b::ID2D1Image>()?;
         scalar(
             &self.displace,
             b::D2D1_DISPLACEMENTMAP_PROP_SCALE,
             field.scale_px,
         )?;
+        scalar(
+            &self.soft_displace,
+            b::D2D1_DISPLACEMENTMAP_PROP_SCALE,
+            field.scale_px,
+        )?;
+        scalar(
+            &self.blur,
+            b::D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
+            field.blur_px,
+        )?;
         unsafe {
             map_border.SetInput(0, &map.cast::<b::ID2D1Image>()?, true);
             map_scale.SetInput(0, &map_border.GetOutput()?, true);
             self.displace.SetInput(1, &map_scale.GetOutput()?, true);
+            self.soft_displace
+                .SetInput(1, &map_scale.GetOutput()?, true);
             self.rim.SetInput(1, &ring, true);
-            self.light.SetInput(0, &ring, true);
             self.shade.SetInput(0, &shade, true);
+            self.frost.SetInput(1, &frost, true);
+            self.mask.SetInput(1, &coverage, true);
+            self.layer.SetInput(0, &coverage, true);
         }
         self.geometry = Some(key);
         Ok(true)
@@ -419,7 +459,7 @@ impl Effects {
 
     fn set_light(&mut self, level: f32) -> Result<()> {
         if self.light_level != Some(level.to_bits()) {
-            color_matrix(&self.light, light_matrix(level))?;
+            color_matrix(&self.light, glint_matrix(level))?;
             self.light_level = Some(level.to_bits());
         }
         Ok(())
@@ -445,6 +485,50 @@ struct Control {
 }
 
 impl GpuGlass {
+    /// Tint and floating backing follow exactly the same continuous silhouette.
+    pub fn draw_layer(
+        &self,
+        session: &DrawingSession<'_>,
+        color: windows_canvas::ColorF,
+    ) -> Result<()> {
+        let Some(effects) = self.effects.as_ref().filter(|_| !self.failed) else {
+            return Ok(());
+        };
+        let Some((w, h, _, _)) = effects.geometry else {
+            return Ok(());
+        };
+        if color.a <= 0.0 {
+            return Ok(());
+        }
+        let mut values = [0.0; 20];
+        values[12] = color.r * color.a;
+        values[13] = color.g * color.a;
+        values[14] = color.b * color.a;
+        values[15] = color.a;
+        color_matrix(&effects.layer, values)?;
+        let context: b::ID2D1DeviceContext = session.raw().cast()?;
+        let saved = session.transform();
+        session.set_transform(&Matrix3x2::identity());
+        let result = (|| -> Result<()> {
+            unsafe {
+                context.DrawImage(
+                    &effects.layer.GetOutput()?,
+                    Some(&Vector2::new(0.0, self.origin_y)),
+                    Some(&b::D2D_RECT_F {
+                        left: 0.0,
+                        top: 0.0,
+                        right: w as f32,
+                        bottom: h as f32,
+                    }),
+                    b::D2D1_INTERPOLATION_MODE_LINEAR,
+                    b::D2D1_COMPOSITE_MODE_SOURCE_OVER,
+                );
+            }
+            Ok(())
+        })();
+        session.set_transform(&saved);
+        result
+    }
     pub fn reset(&mut self) {
         *self = Self::default();
     }

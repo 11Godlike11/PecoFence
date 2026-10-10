@@ -102,12 +102,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
         })?;
         let pixels = target.read_pixels()?;
-        // kube's clear glass: the flat face shows the wallpaper pixel for pixel.
-        assert_eq!(
-            [pixels[centre], pixels[centre + 4]],
-            [0, 255],
-            "the clear centre must not be blurred or moved"
-        );
+        // The new regular material gently softens one-pixel detail, without tint.
+        for value in [pixels[centre], pixels[centre + 4]] {
+            assert!(
+                (value as i32 - 128).abs() <= 2,
+                "frost must preserve checker luminance"
+            );
+        }
         assert_eq!(
             pixels[centre + 3],
             255,
@@ -151,7 +152,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             cache.uploads, 2,
             "wallpaper refresh must upload only the changed source"
         );
-        println!("clear centre, source refresh and negative desktop coordinates passed");
+        println!("neutral frost, source refresh and negative desktop coordinates passed");
     }
 
     {
@@ -305,7 +306,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     } else if delta > 8 {
                         changed += 1;
                     }
-                    assert_eq!(lens[index + 3], 255);
+                    assert_eq!(
+                        lens[index + 3],
+                        plain[index + 3],
+                        "control changed the parent silhouette"
+                    );
                 }
             }
             assert!(

@@ -1,7 +1,7 @@
 //! Cached Liquid Glass optics over the monitor wallpaper.
 //!
-//! The GPU plate (`displacement_field`, evaluated by `gpu_glass`) uses an elliptical
-//! shoulder with Snell refraction, a broad directional reflection and a soft underside.
+//! The GPU plate uses a continuous-corner SDF, quarter-circle edge displacement,
+//! a flat face and narrow, directional glints. No RGB separation or whole-face zoom.
 //! Geometry is cached independently of wallpaper position.
 //! The older CPU path (`crop`, `refracted_overlay`) keeps its own
 //! hand-tuned bezel and remains for comparison renders only.
@@ -188,69 +188,35 @@ fn inward_direction(
     (dx * inverse_length, dy * inverse_length)
 }
 
-/// A wider, circular shoulder makes the plate read as a rounded volume. Small controls
-/// scale the whole cross-section, rather than squeezing a full-sized lens into a capsule.
-pub(crate) const BEZEL_DIP: f32 = 32.0;
-const GLASS_BASE: f64 = 0.5;
-const GLASS_HEIGHT: f64 = 1.0;
-/// A shallow dome gently magnifies the whole face, instead of leaving an optically flat
-/// rectangle surrounded by a lens. It fades in behind the shoulder and vanishes at centre.
-const FACE_MAGNIFICATION: f32 = 0.024;
+/// Continuous-corner radius, independent from the optical bevel width.
+pub(crate) const CORNER_RADIUS_DIP: f32 = 42.0;
+const OPTICAL_BEVEL_DIP: f32 = 20.0;
 const MAP_TEXELS_PER_DIP: f32 = 1.0;
-const LUT_SAMPLES: usize = 256;
 
-/// Vertical ray through an elliptical cap. The analytical normal avoids the very steep
-/// quartic shoulder of the upstream profile; its broad bend carries the sense of thickness.
-/// A gradual thickness taper eases to a zero derivative at the face, preventing an
-/// inner contour without introducing a short, steep recovery section.
-fn rounded_offset(x: f64) -> f64 {
-    let x = x.clamp(0.0, 1.0);
-    let eta = 1.0 / 1.5;
-    let y = (x * (2.0 - x)).sqrt();
-    let slope = GLASS_HEIGHT * (1.0 - x) / y.max(1e-6);
-    let length = (slope * slope + 1.0).sqrt();
-    let (nx, ny) = (-slope / length, -1.0 / length);
-    let k = 1.0 - eta * eta * (1.0 - ny * ny);
-    if k < 0.0 {
-        return 0.0;
-    }
-    let q = k.sqrt();
-    let (rx, ry) = (-(eta * ny + q) * nx, eta - (eta * ny + q) * ny);
-    let ease = 1.0 - x * x;
-    rx * (y * GLASS_HEIGHT + GLASS_BASE) / ry * ease
-}
-
-fn offset_lut() -> &'static [f32; LUT_SAMPLES + 1] {
-    static LUT: std::sync::OnceLock<[f32; LUT_SAMPLES + 1]> = std::sync::OnceLock::new();
-    LUT.get_or_init(|| {
-        std::array::from_fn(|i| rounded_offset(i as f64 / LUT_SAMPLES as f64) as f32)
-    })
-}
-
-/// Inward displacement in bezel widths at `depth` bezel widths from the rim.
+/// Quarter-circle displacement profile used by Kyant0/AndroidLiquidGlass and
+/// whynotmake-it/liquid_glass_renderer. See docs/GLASS_RENDERING.md for attribution.
+/// `depth` is normalized inset; the derivative reaches zero at the flat face.
 fn bezel_offset(depth: f32) -> f32 {
-    if depth >= 1.0 {
-        return 0.0;
-    }
-    let lut = offset_lut();
-    let at = depth.max(0.0) * LUT_SAMPLES as f32;
-    let i = (at as usize).min(LUT_SAMPLES - 1);
-    let t = at - i as f32;
-    lut[i] + (lut[i + 1] - lut[i]) * t
+    let x = 1.0 - depth.clamp(0.0, 1.0);
+    1.0 - (1.0 - x * x).max(0.0).sqrt()
 }
 
-/// Reflection rolls across the shoulder rather than drawing a closed bright ring.
-/// A small opposite bounce and a separate underside shade retain depth on dark wallpaper.
+/// Both sides along the light axis catch a thin glint. It fades around the corners,
+/// while a restrained contour separates the unlit sides from the backdrop.
 fn shoulder_light(nx: f32, ny: f32, depth: f32, bezel: f32) -> (f32, f32) {
-    if bezel <= 0.0 || !(0.0..bezel).contains(&depth) {
+    if bezel <= 0.0 || depth < -0.5 || depth >= bezel {
         return (0.0, 0.0);
     }
-    let t = depth / bezel;
-    let shoulder = (std::f32::consts::PI * t.sqrt()).sin().max(0.0).powi(2);
+    let inset = depth.max(0.0);
+    let width = 1.2f32.min(bezel * 0.3);
+    let profile = (1.0 - inset / width).max(0.0) + 0.21 * (1.0 - inset / (width * 4.0)).max(0.0);
+    let tangency = (nx * 0.866_025_4 + ny * 0.5).abs().min(1.0);
+    let alignment = 1.0 - tangency;
     let facing = nx * 0.5 - ny * 0.866_025_4;
-    let highlight = (facing.max(0.0).powi(2) + 0.22 * (-facing).max(0.0).powi(2)) * shoulder;
-    let shade = (-facing).max(0.0).powi(2) * shoulder;
-    (highlight, shade)
+    let highlight = profile * alignment * if facing >= 0.0 { 1.0 } else { 0.8 };
+    let contour = (1.0 - inset / 0.85).max(0.0) * (0.25 + 0.75 * tangency);
+    let shadow = smootherstep(inset / 2.5) * (1.0 - inset / 12.0).max(0.0).powi(2) * 0.18;
+    (highlight.min(1.0), contour + shadow)
 }
 
 /// IEEE half precision; the map stays within 0..=1, where 0.5 (no displacement) is exact.
@@ -279,6 +245,9 @@ pub(crate) struct DisplacementField {
     /// A8 specular ring at device resolution, the size of the plate.
     pub rim: Vec<u8>,
     pub shade: Vec<u8>,
+    pub coverage: Vec<u8>,
+    pub frost: Vec<u8>,
+    pub blur_px: f32,
     pub rim_width: u32,
     pub rim_height: u32,
     pub scale_px: f32,
@@ -293,9 +262,9 @@ pub(crate) fn displacement_field(
     let scale = scale.max(0.5);
     let (w, h) = (width as f32 / scale, height as f32 / scale);
     let radius = radius.min(w.min(h) * 0.5).max(0.0);
-    let bezel = BEZEL_DIP.min(radius);
-    let max_offset = offset_lut().iter().fold(0.0f32, |m, v| m.max(v.abs())) * bezel
-        + w.max(h) * 0.5 * FACE_MAGNIFICATION;
+    let shape = crate::glass_shape::GlassShape::new(w, h, radius);
+    let bezel = OPTICAL_BEVEL_DIP.min(w.min(h) * 0.25).min(radius);
+    let max_offset = (bezel * 2.2).min(w.min(h) * 0.5);
     let scale_px = (2.0 * max_offset * scale).max(1.0);
     let map_w = (w * MAP_TEXELS_PER_DIP).ceil().max(2.0) as u32;
     let map_h = (h * MAP_TEXELS_PER_DIP).ceil().max(2.0) as u32;
@@ -313,19 +282,17 @@ pub(crate) fn displacement_field(
         let my = map_h - 1 - y;
         for x in 0..map_w.div_ceil(2) {
             let px = (x as f32 + 0.5) * w / map_w as f32;
-            let (nx, ny, depth) = edge(px, py, w, h, radius);
+            let (nx, ny, depth) = shape.edge(px, py);
             let rim = if bezel > 0.0 && depth < bezel {
-                bezel * bezel_offset(depth / bezel)
+                max_offset * bezel_offset(depth / bezel)
             } else {
                 0.0
             };
             if bezel <= 0.0 {
                 continue;
             }
-            let dome = FACE_MAGNIFICATION * smootherstep(depth / bezel);
-            // Sample inward through both the shoulder and the gently domed face.
-            let dx = (nx * rim + (px - w * 0.5) * dome) * scale;
-            let dy = (ny * rim + (py - h * 0.5) * dome) * scale;
+            let dx = nx * rim * scale;
+            let dy = ny * rim * scale;
             let mx = map_w - 1 - x;
             put(x, y, dx, dy);
             if mx != x {
@@ -341,8 +308,10 @@ pub(crate) fn displacement_field(
     }
     let mut rim = vec![0u8; width as usize * height as usize];
     let mut shade = vec![0u8; rim.len()];
-    let band = ((bezel + radius) * scale).ceil() as u32 + 1;
-    let side = (bezel * scale).ceil() as u32 + 1;
+    let mut coverage = vec![255u8; rim.len()];
+    let mut frost = vec![255u8; rim.len()];
+    let band = (radius.max(bezel) * scale).ceil() as u32 + 1;
+    let side = band;
     let last = (width * height) as usize - 1;
     for y in 0..height.div_ceil(2) {
         let py = (y as f32 + 0.5) / scale;
@@ -353,7 +322,7 @@ pub(crate) fn displacement_field(
                 x = width - side;
                 continue;
             }
-            let (nx, ny, depth) = edge((x as f32 + 0.5) / scale, py, w, h, radius);
+            let (nx, ny, depth) = shape.edge((x as f32 + 0.5) / scale, py);
             let (alpha, dark) = shoulder_light(nx, ny, depth, bezel);
             let (opposite_alpha, opposite_dark) = shoulder_light(-nx, -ny, depth, bezel);
             let i = (y * width + x) as usize;
@@ -361,6 +330,16 @@ pub(crate) fn displacement_field(
             rim[last - i] = (opposite_alpha * 255.0).round().clamp(0.0, 255.0) as u8;
             shade[i] = (dark * 255.0).round().clamp(0.0, 255.0) as u8;
             shade[last - i] = (opposite_dark * 255.0).round().clamp(0.0, 255.0) as u8;
+            let mask = ((depth * scale + 0.5).clamp(0.0, 1.0) * 255.0).round() as u8;
+            coverage[i] = mask;
+            coverage[last - i] = mask;
+            let soft = if bezel > 0.0 {
+                smootherstep(depth / bezel)
+            } else {
+                1.0
+            };
+            frost[i] = (soft * mask as f32).round() as u8;
+            frost[last - i] = frost[i];
             x += 1;
         }
     }
@@ -370,6 +349,9 @@ pub(crate) fn displacement_field(
         rgba,
         rim,
         shade,
+        coverage,
+        frost,
+        blur_px: 1.15f32.min(w.min(h) * 0.04) * scale,
         rim_width: width,
         rim_height: height,
         scale_px,
@@ -683,18 +665,15 @@ mod tests {
     }
 
     #[test]
-    fn elliptical_shoulder_has_broad_bending_and_a_smooth_endpoint() {
-        assert!((0.4..0.6).contains(&bezel_offset(0.0)));
-        assert!(
-            bezel_offset(0.5) > 0.15,
-            "bend must extend across the shoulder"
-        );
+    fn circular_bevel_reaches_the_face_with_zero_displacement_and_slope() {
+        assert_eq!(bezel_offset(0.0), 1.0);
+        assert!((bezel_offset(0.5) - 0.133_974_6).abs() < 1e-6);
         for i in 0..=1000 {
             let value = bezel_offset(i as f32 / 1000.0);
-            assert!(value.is_finite() && (0.0..0.7).contains(&value));
+            assert!(value.is_finite() && (0.0..=1.0).contains(&value));
         }
         assert!(
-            BEZEL_DIP * bezel_offset(0.99) < 0.01,
+            CORNER_RADIUS_DIP * bezel_offset(0.99) < 0.01,
             "end of shoulder must be subpixel"
         );
         assert_eq!(bezel_offset(1.0), 0.0);
@@ -702,51 +681,49 @@ mod tests {
     }
 
     #[test]
-    fn gpu_field_is_symmetric_dpi_independent_and_gently_magnifies_the_face() {
-        let field = displacement_field(800, 600, 2.0, BEZEL_DIP);
+    fn gpu_field_is_symmetric_dpi_independent_and_leaves_the_face_undisplaced() {
+        let field = displacement_field(800, 600, 2.0, CORNER_RADIUS_DIP);
         assert_eq!((field.width, field.height), (400, 300));
         assert_eq!((field.rim_width, field.rim_height), (800, 600));
         assert!(texel_offset(&field, 0, 150).0 > 20.0);
         assert!(texel_offset(&field, 399, 150).0 < -20.0);
-        assert!(texel_offset(&field, 16, 150).0 > 10.0);
-        assert!(
-            texel_offset(&field, 80, 150).0 > 4.0,
-            "face must be a shallow lens"
+        assert!(texel_offset(&field, 8, 150).0 > 10.0);
+        assert_eq!(
+            texel_offset(&field, 80, 150),
+            (0.0, 0.0),
+            "the face must not magnify"
         );
         assert!(texel_offset(&field, 200, 150).0.abs() < 0.1);
         for y in 0..300 {
             for x in 0..400 {
                 let a = texel_offset(&field, x, y);
                 let b = texel_offset(&field, 399 - x, 299 - y);
-                assert!((a.0 + b.0).abs() < 0.08 && (a.1 + b.1).abs() < 0.08);
+                assert!((a.0 + b.0).abs() < 0.1 && (a.1 + b.1).abs() < 0.1);
             }
         }
-        let high_dpi = displacement_field(1600, 1200, 4.0, BEZEL_DIP);
+        let high_dpi = displacement_field(1600, 1200, 4.0, CORNER_RADIUS_DIP);
         assert_eq!(field.rgba, high_dpi.rgba);
         assert_eq!(high_dpi.scale_px, 2.0 * field.scale_px);
     }
 
     #[test]
-    fn shoulder_joins_the_domelike_face_without_an_inner_contour() {
-        let field = displacement_field(400, 300, 1.0, BEZEL_DIP);
+    fn bevel_joins_the_flat_face_without_an_inner_contour() {
+        let field = displacement_field(400, 300, 1.0, CORNER_RADIUS_DIP);
         let sample = |x: usize| x as f32 + 0.5 + texel_offset(&field, x, 150).0;
         let slope = |x: usize| sample(x + 1) - sample(x);
-        for x in 8..44 {
-            assert!(
-                slope(x) > 0.15,
-                "background folds inside the shoulder at {x}"
-            );
+        for x in 15..44 {
             assert!(
                 (slope(x + 1) - slope(x)).abs() < 0.18,
                 "hard inner edge at {x}"
             );
         }
-        assert!((slope(40) - (1.0 - FACE_MAGNIFICATION)).abs() < 0.03);
+        assert!((slope(22) - 1.0).abs() < 0.01);
+        assert!((slope(19) - 1.0).abs() < 0.03);
     }
 
     #[test]
     fn short_plates_and_corner_diagonals_have_no_displacement_seam() {
-        let rolled = displacement_field(640, 72, 2.0, BEZEL_DIP);
+        let rolled = displacement_field(640, 72, 2.0, CORNER_RADIUS_DIP);
         for x in [40usize, 160, 280] {
             let upper = texel_offset(&rolled, x, 17);
             let lower = texel_offset(&rolled, x, 18);
@@ -754,35 +731,35 @@ mod tests {
             assert!(upper.1.abs() < 0.2 && lower.1.abs() < 0.2);
             assert!((upper.1 + lower.1).abs() < 0.05);
         }
-        let square = displacement_field(300, 300, 1.0, BEZEL_DIP);
+        let square = displacement_field(300, 300, 1.0, CORNER_RADIUS_DIP);
         for d in 12..40 {
             let a = texel_offset(&square, d, d + 1);
             let b = texel_offset(&square, d + 1, d);
             assert!((a.0 - b.1).abs() < 0.05 && (a.1 - b.0).abs() < 0.05);
             let c = texel_offset(&square, d, d);
             assert!(
-                (a.0 - c.0).abs() < 0.7 && (a.1 - c.1).abs() < 0.7,
+                (a.0 - c.0).abs() < 2.0 && (a.1 - c.1).abs() < 2.0,
                 "crease at {d}"
             );
         }
     }
 
     #[test]
-    fn shoulder_reflection_is_broad_directional_and_scales_in_dips() {
+    fn glint_stays_narrow_directional_and_scales_in_dips() {
         for scale in [1.0, 1.25, 1.5, 2.0] {
             let (w, h) = ((320.0 * scale) as u32, (120.0 * scale) as u32);
-            let field = displacement_field(w, h, scale, BEZEL_DIP);
+            let field = displacement_field(w, h, scale, CORNER_RADIUS_DIP);
             let x = w / 2;
             let alpha = |y: u32| field.rim[(y * w + x) as usize];
             let shade = |y: u32| field.shade[(y * w + x) as usize];
-            let shoulder = (8.0 * scale) as u32;
-            assert!(
-                alpha(shoulder) > 150,
-                "broad top highlight missing at {scale}"
+            assert!(alpha(0) > 70, "thin top glint missing at {scale}");
+            assert_eq!(
+                alpha((6.0 * scale) as u32),
+                0,
+                "glint must not cover the shoulder"
             );
-            assert!(alpha((16.0 * scale) as u32) > 80);
-            assert!(alpha(shoulder) > alpha(h - 1 - shoulder) * 3);
-            assert!(shade(h - 1 - shoulder) > 150);
+            assert!(alpha(h - 1) > 50, "opposite wall must also catch light");
+            assert!(shade((6.0 * scale) as u32) < 20, "no broad dark shoulder");
             assert_eq!(alpha(h / 2), 0);
             assert_eq!(shade(h / 2), 0);
         }
@@ -791,11 +768,11 @@ mod tests {
     #[test]
     fn short_and_sharp_plates_scale_the_whole_surface_without_nan() {
         for (w, h, scale, radius) in [
-            (640, 64, 2.0, BEZEL_DIP),
-            (300, 40, 1.25, BEZEL_DIP),
+            (640, 64, 2.0, CORNER_RADIUS_DIP),
+            (300, 40, 1.25, CORNER_RADIUS_DIP),
             (120, 28, 1.0, 12.0),
             (200, 200, 1.5, 0.0),
-            (2, 2, 1.0, BEZEL_DIP),
+            (2, 2, 1.0, CORNER_RADIUS_DIP),
         ] {
             let field = displacement_field(w, h, scale, radius);
             assert!(field.scale_px.is_finite() && field.scale_px >= 1.0);
@@ -807,6 +784,8 @@ mod tests {
             );
             assert_eq!(field.rim.len(), (w * h) as usize);
             assert_eq!(field.shade.len(), (w * h) as usize);
+            assert_eq!(field.coverage.len(), (w * h) as usize);
+            assert_eq!(field.frost.len(), (w * h) as usize);
         }
         let sharp = displacement_field(200, 200, 1.5, 0.0);
         assert!(

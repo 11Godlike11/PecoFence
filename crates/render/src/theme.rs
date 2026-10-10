@@ -167,10 +167,10 @@ impl Theme {
 
     /// Liquid Glass-inspired chrome. Keep mode and accent independent of the material.
     /// The composition root clips to this radius, including content and height animations.
-    /// It matches the wider elliptical shoulder of the GPU optical surface.
+    /// It matches the continuous-corner silhouette of the GPU optical surface.
     pub const fn with_liquid_glass(mut self) -> Self {
         self.liquid_glass = true;
-        self.corner_radius = crate::liquid_glass::BEZEL_DIP;
+        self.corner_radius = crate::liquid_glass::CORNER_RADIUS_DIP;
         self.glass_rim_top = ColorF::from_rgba8(0xFF, 0xFF, 0xFF, 0xCD);
         match self.mode {
             ThemeMode::Dark => {
@@ -418,7 +418,7 @@ mod tests {
             assert_eq!(glass.accent_rgb8(), base.accent_rgb8());
             assert_eq!(glass.selection_fill, base.selection_fill);
             assert!(glass.acrylic_tint().blur_sigma_dip < base.acrylic_tint().blur_sigma_dip);
-            assert_eq!(glass.corner_radius, crate::liquid_glass::BEZEL_DIP);
+            assert_eq!(glass.corner_radius, crate::liquid_glass::CORNER_RADIUS_DIP);
             assert_eq!(glass.title_height, base.title_height);
             assert!(!base.liquid_glass);
         }

@@ -1,18 +1,18 @@
 # Wallpaper Engine personal build
 
 This fork adds live Wallpaper Engine backgrounds to **Liquid Glass**. Version
-`0.1.5-we.3` is based on upstream PecoFence 0.1.5. This fork redesigns the GPU
-optical surface: a 32 DIP elliptical shoulder replaces the narrow quartic bezel,
-and a shallow dome gently magnifies the face by 2.4%. Broad directional highlights,
-a faint white bounce and larger corners make the glass read as a rounded
-volume. The black underside overlay from we.2 is removed. Reflection preserves
-the wallpaper saturation and blends at 6%; it no longer
-forms a highly saturated closed ring. Small controls scale the whole cross-section.
-The geometry and light masks remain cached between wallpaper frames.
+`0.1.5-we.4` is based on upstream PecoFence 0.1.5. The GPU optics now use
+continuous superellipse corners, a flat face, curved edge displacement, subtle
+interior frost and narrow directional glints. The material and Windows compositor
+clip share the same silhouette. Whole-face magnification and the previous broad
+highlight/bounce layers have been removed. No RGB dispersion or full-face black
+overlay is applied. Geometry and masks remain cached between wallpaper frames.
+See [GLASS_RENDERING.md](GLASS_RENDERING.md) for formulas, source attribution and
+validation limits. This is an approximation, not a proven pixel-perfect iOS match.
 
 ## Supported path
 
-Verified on Windows 11 24H2 at 2560 × 1440 and 150% DPI, with the existing
+Verified on Windows 11 at 2560 × 1440, with the existing
 **Hide real desktop icons** setting enabled. Windows Graphics Capture reads the
 actual GPU-composited desktop root containing Wallpaper Engine. Modern Explorer
 embeds WPE as a child window, which cannot be captured directly by CreateForWindow.
@@ -81,18 +81,27 @@ the wallpaper moved; a paused wallpaper cannot validate motion.
 wallpapers using WPE's CLI and restores the original on exit. Arguments are WPE
 executable, original project, web project, video project, output directory. It
 keeps one worker alive across all phases and saves each source image for inspection.
-Uniform gray GPU rendering also checked material brightness: a 160 input produced
-161 at the face and 162 on both sampled shoulders, with no black tint applied.
+Uniform gray GPU rendering is used to check material brightness independently of
+wallpaper color. GPU tests also exercise neutral frosting, opacity and source
+replacement. Edge contours are weak and local; user-selected opacity/tint and
+floating-fence backing can still alter the overall appearance.
 
 On the development machine, the capture worker delivered 80 frames in four
 seconds, and the two visible-desktop samples differed. An isolated application
 instance displayed the captured rain wallpaper with refracting glass edges and
 survived switching Fluent → Liquid Glass. The installed build was then replaced
 after backing up the original executable and configuration; the user confirmed
-the real desktop fences display the Wallpaper Engine wallpaper. The revised
-optics were compared using GPU renders over the same captured rain frame, including
-a narrow tab strip. Regression checks cover DPI invariance, corner continuity,
-the shoulder-to-face transition and directional reflection width.
+the real desktop fences display the Wallpaper Engine wallpaper. The we.4 optics
+were compared using actual GPU renders over captured rain and sunset frames.
+Offscreen comparisons use 150% DPI; the installed we.4 window was checked at
+125% DPI. An isolated native app exercised full height, folding/unfolding,
+resizing and a simulated lost device with successful recovery, then exited
+normally. The installed release connected to live WPE and its screenshot was
+inspected against the current SpongeBob wallpaper. The production configuration
+matched its saved copy after installation.
+Regression checks cover DPI invariance, matching clip/optical geometry, corner
+continuity, the bevel-to-flat-face transition and narrow directional glints.
+These checks do not establish the user's visual acceptance or native iOS fidelity.
 
 A five-second sample of `0.1.5-we.1` with five installed fences measured about 1.4% of total CPU
 capacity on a 20-logical-processor machine and a 109 MB working set. This is a

@@ -545,7 +545,7 @@ impl FenceViewState {
     pub(super) fn update_shape_clip(&self, w: i32, h: i32) -> Result<()> {
         let inset = self.plate_inset_px.clamp(0, (h - 1).max(0));
         if self.theme.liquid_glass {
-            self.motion.clip_rounded_at(
+            self.motion.clip_glass_at(
                 &self.root,
                 inset as f32,
                 w as f32,

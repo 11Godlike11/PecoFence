@@ -223,7 +223,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let qx = (x as f32 + 0.5 - w as f32 * 0.5).abs() - (w as f32 * 0.5 - radius);
             let qy = (y as f32 + 0.5 - h as f32 * 0.5).abs() - (h as f32 * 0.5 - radius);
             let distance = qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - radius;
-            let coverage = (0.5 - distance).clamp(0.0, 1.0);
+            // GPU output already carries its continuous-corner mask. A circular
+            // preview mask would cut off the very corners being evaluated.
+            let coverage = if gpu_material {
+                1.0
+            } else {
+                (0.5 - distance).clamp(0.0, 1.0)
+            };
             let src = ((y * w + x) * 4) as usize;
             let dst = (((y + pad) as u32 * result.width + (x + pad) as u32) * 4) as usize;
             let alpha = plate[src + 3] as f32 / 255.0 * coverage;

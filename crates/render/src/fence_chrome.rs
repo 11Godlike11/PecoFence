@@ -608,8 +608,7 @@ fn draw_plate(
             } else {
                 let mut c = theme.glass_layer_fill;
                 c.a *= opacity.min(1.0) * plate_a;
-                let layer = session.create_solid_brush(c)?;
-                session.fill_rect(&outer, &layer);
+                material.borrow().draw_layer(session, c)?;
             }
         }
         Backdrop::MicaLike(crop) if crop.image.width > 0 && crop.image.height > 0 => {
@@ -726,7 +725,7 @@ fn draw_plate(
     // A single 1 px rim, lit from the upper left and snapped to device pixels at every DPI.
     let rim_rect = px.ring(outer, radius);
     if sampled_material && theme.liquid_glass {
-        // The GPU material lights its own rim (kube's specular ring).
+        // The GPU material includes its own continuous-corner mask and directional glints.
         if !matches!(backdrop, Backdrop::GpuGlass { .. }) {
             let saved = session.transform();
             session.set_transform(&(Matrix3x2::translation(0.0, plate_top) * saved));

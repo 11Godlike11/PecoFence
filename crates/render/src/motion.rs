@@ -130,6 +130,8 @@ impl Prop {
 /// Compositor-side animation helper bound to the app's compositor.
 pub struct Motion {
     raw: comp::Compositor,
+    geometry_device: windows_canvas::GpuDevice,
+    continuous_clips: RefCell<std::collections::HashMap<usize, [f32; 4]>>,
     enabled: Cell<bool>,
     easings: RefCell<Vec<(Curve, comp::CompositionEasingFunction)>>,
 }
@@ -147,6 +149,8 @@ impl Motion {
     pub fn new(stack: &RenderStack) -> Result<Self> {
         Ok(Self {
             raw: stack.compositor.as_raw().cast::<comp::Compositor>()?,
+            geometry_device: stack.geometry_device(),
+            continuous_clips: RefCell::new(std::collections::HashMap::new()),
             enabled: Cell::new(true),
             easings: RefCell::new(Vec::new()),
         })
@@ -350,6 +354,9 @@ impl Motion {
     }
 
     pub fn clear_clip(&self, v: &Visual) -> Result<()> {
+        self.continuous_clips
+            .borrow_mut()
+            .remove(&(v.as_raw().as_raw() as usize));
         raw_visual(v)?.SetClip(None::<&comp::CompositionClip>)
     }
 
@@ -369,6 +376,9 @@ impl Motion {
         height: f32,
         radius: f32,
     ) -> Result<()> {
+        self.continuous_clips
+            .borrow_mut()
+            .remove(&(v.as_raw().as_raw() as usize));
         let visual = raw_visual(v)?;
         let existing = visual
             .Clip()
@@ -392,12 +402,56 @@ impl Motion {
 
     /// Read back the actual clip properties for frame-by-frame geometry diagnostics.
     pub fn rounded_clip_bounds(&self, v: &Visual) -> Result<(Vector2, Vector2)> {
+        if let Some([_, w, h, r]) = self
+            .continuous_clips
+            .borrow()
+            .get(&(v.as_raw().as_raw() as usize))
+        {
+            return Ok((Vector2::new(*w, *h), Vector2::new(*r, *r)));
+        }
         let geometry = raw_visual(v)?
             .Clip()?
             .cast::<comp::CompositionGeometricClip>()?
             .Geometry()?
             .cast::<comp::CompositionRoundedRectangleGeometry>()?;
         Ok((geometry.Size()?, geometry.CornerRadius()?))
+    }
+
+    /// Continuous corners shared with GPU glass; every height/fold frame updates the path.
+    pub fn clip_glass_at(
+        &self,
+        v: &Visual,
+        top: f32,
+        width: f32,
+        height: f32,
+        radius: f32,
+    ) -> Result<()> {
+        let key = v.as_raw().as_raw() as usize;
+        let bounds = [top, width, height, radius];
+        if self.continuous_clips.borrow().get(&key) == Some(&bounds) {
+            return Ok(());
+        }
+        let visual = raw_visual(v)?;
+        let geometry = visual
+            .Clip()
+            .ok()
+            .and_then(|c| c.cast::<comp::CompositionGeometricClip>().ok())
+            .and_then(|c| c.Geometry().ok())
+            .and_then(|g| g.cast::<comp::CompositionPathGeometry>().ok());
+        let geometry = match geometry {
+            Some(g) => g,
+            None => {
+                let g = self.raw.CreatePathGeometry()?;
+                visual.SetClip(&self.raw.CreateGeometricClipWithGeometry(&g)?)?;
+                g
+            }
+        };
+        let shape = crate::glass_shape::GlassShape::new(width, height, radius);
+        geometry.SetPath(&crate::geometry_source::composition_path(
+            shape.path(&self.geometry_device, top)?,
+        )?)?;
+        self.continuous_clips.borrow_mut().insert(key, bounds);
+        Ok(())
     }
 
     /// Runs `start` (which should start one or more animations) inside a scoped batch and
