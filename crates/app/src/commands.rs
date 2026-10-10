@@ -43,9 +43,29 @@ pub enum TransferMode {
     Link,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum DesktopAction {
+    SelectAll,
+    Clear,
+    Copy { cut: bool },
+    Delete { permanent: bool },
+    Open,
+    Rename,
+    Properties,
+}
+
 #[derive(Debug)]
 #[allow(dead_code)]
 pub enum Command {
+    DesktopAction {
+        fence: FenceId,
+        action: DesktopAction,
+    },
+    ClearDesktopSelection {
+        except: FenceId,
+    },
+    DesktopDoubleClick,
+    RefreshDesktop,
     /// A fence window finished a move/resize; persist its geometry.
     FenceBoundsChanged {
         fence: FenceId,

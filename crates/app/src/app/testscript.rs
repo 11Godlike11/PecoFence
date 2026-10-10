@@ -417,6 +417,7 @@ impl App {
                     if *verb != "marquee-end" {
                         self.on_desktop_marquee(MarqueeEvent::Pressed {
                             additive: !rest.is_empty(),
+                            toggle: false,
                         });
                         self.on_desktop_marquee(MarqueeEvent::Moved(rect));
                     }

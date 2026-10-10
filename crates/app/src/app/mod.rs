@@ -2,8 +2,9 @@
 
 use crate::anchor::{self, AnchorCell, DesktopAnchor, ShowDesktopBehavior, ZMode};
 use crate::commands::{
-    Command, CommandQueue, TransferMode, WM_APP_COMMAND, WM_APP_FRAME, WM_APP_FS_CHANGED,
-    WM_APP_PEEK_FOCUSED, WM_APP_PREWARM_DONE, WM_APP_SHELL_CHANGED, WM_APP_TRAY, WM_APP_WALLPAPER,
+    Command, CommandQueue, DesktopAction, TransferMode, WM_APP_COMMAND, WM_APP_FRAME,
+    WM_APP_FS_CHANGED, WM_APP_PEEK_FOCUSED, WM_APP_PREWARM_DONE, WM_APP_SHELL_CHANGED, WM_APP_TRAY,
+    WM_APP_WALLPAPER,
 };
 use crate::fence_window::{
     BackdropMode, BackdropSets, Behavior, FenceContext, FenceWindow, ItemView, TabView,
@@ -181,6 +182,7 @@ pub struct App {
     desktop_windows: HashMap<String, FenceWindow>,
     desktop_descriptor: pecofence_core::Fence,
     desktop_marquee_base: HashMap<FenceId, Vec<ItemId>>,
+    desktop_marquee_toggle: bool,
     /// Windows of deleted / merged fences, kept alive while they fade out; dropped (destroyed)
     /// on `Command::FadeOutDone`.
     dying: Vec<FenceWindow>,
@@ -836,6 +838,7 @@ impl App {
                         .ok(),
                 ),
                 selection: std::cell::RefCell::new(Vec::new()),
+                desktop_selection: RefCell::new(HashMap::new()),
                 pushed: std::cell::RefCell::new(Vec::new()),
                 size_move: std::cell::RefCell::new(None),
             }),
@@ -925,6 +928,7 @@ impl App {
             desktop_windows: HashMap::new(),
             desktop_descriptor,
             desktop_marquee_base: HashMap::new(),
+            desktop_marquee_toggle: false,
             anchor: anchor_cell,
             control,
             queue,
@@ -1238,6 +1242,14 @@ impl App {
 
     fn handle(&mut self, cmd: Command) {
         match cmd {
+            Command::DesktopAction { fence, action } => self.desktop_action(fence, action),
+            Command::RefreshDesktop => self.refresh_desktop(),
+            Command::ClearDesktopSelection { except } => self.clear_desktop_selection(except),
+            Command::DesktopDoubleClick => {
+                if self.state.config.settings.quick_hide.enabled {
+                    self.toggle_all_fences();
+                }
+            }
             Command::FenceBoundsChanged { fence, rect } => {
                 let (rolled, expanded) = self
                     .fences
@@ -1372,6 +1384,8 @@ impl App {
                 }
             }
             Command::ExternalDrop { paths, to, mode } => {
+                let desktop_view = self.is_desktop_view(to);
+                let pt = window::cursor_pos();
                 let copy = mode == TransferMode::Copy;
                 let desktop_dirs: Vec<PathBuf> = [shell::user_desktop(), shell::public_desktop()]
                     .into_iter()
@@ -1406,11 +1420,11 @@ impl App {
                             .collect();
                         for path in &routed {
                             self.pending_routes.push(PendingRoute {
-                                fence: to,
+                                fence: if desktop_view { uuid::Uuid::nil() } else { to },
                                 path: path.clone(),
                                 since: Instant::now(),
                                 rename: false,
-                                desktop_position: None,
+                                desktop_position: desktop_view.then_some((pt.x, pt.y)),
                             });
                         }
                         let owner = self.window_for(to).map(|w| w.hwnd());
@@ -1564,6 +1578,7 @@ impl App {
     }
 
     pub fn shutdown(&mut self) {
+        clipboard::flush();
         self.end_peek_now();
         self.state.save_if_dirty();
         self.fences.clear();

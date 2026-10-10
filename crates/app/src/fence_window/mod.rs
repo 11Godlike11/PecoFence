@@ -5,7 +5,8 @@
 
 use crate::anchor::{self, AnchorCell};
 use crate::commands::{
-    Command, CommandQueue, TransferMode, WM_APP_FADE_DONE, WM_APP_SET_VISIBLE, WM_APP_TAB_SWAP_DONE,
+    Command, CommandQueue, DesktopAction, TransferMode, WM_APP_FADE_DONE, WM_APP_SET_VISIBLE,
+    WM_APP_TAB_SWAP_DONE,
 };
 use crate::icons::{IconCache, Lookup};
 use crate::layout::{
@@ -136,6 +137,8 @@ pub struct Behavior {
     /// Fence windows (and their host fence ids) selected with a marquee on the desktop; a
     /// title drag of one of them moves them all. Owned by the App (`App::set_fence_selection`).
     pub selection: std::cell::RefCell<Vec<(HWND, FenceId)>>,
+    /// Cached on selection redraw so a drag can collect selections across monitors.
+    pub desktop_selection: RefCell<HashMap<FenceId, Vec<(ItemId, PathBuf)>>>,
     /// Fence windows moved down out of an expanded neighbour's way (`rollUp.pushNeighbors`).
     /// Owned by the App's push pass (`app/push.rs`).
     pub pushed: std::cell::RefCell<Vec<Pushed>>,

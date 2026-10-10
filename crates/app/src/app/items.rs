@@ -53,6 +53,7 @@ impl App {
     /// Fence menu "新建 ▸": create the file/folder on the real desktop and remember which fence
     /// asked for it; the watcher's next Added event routes it there and opens rename.
     pub(super) fn create_desktop_item(&mut self, fence: FenceId, folder: bool) {
+        let desktop_view = self.is_desktop_view(fence);
         let portal_dir = self.state.portal_path(fence);
         let Some(dir) = portal_dir.clone().or_else(shell::user_desktop) else {
             return;
@@ -94,7 +95,11 @@ impl App {
                     return;
                 }
                 self.pending_routes.push(PendingRoute {
-                    fence,
+                    fence: if desktop_view {
+                        uuid::Uuid::nil()
+                    } else {
+                        fence
+                    },
                     path,
                     since: Instant::now(),
                     rename: true,
@@ -191,6 +196,14 @@ impl App {
     }
 
     pub(super) fn begin_item_rename(&mut self, fence: FenceId, item: ItemId) {
+        let fence = if self.is_desktop_view(fence) {
+            self.desktop_windows
+                .values()
+                .find(|w| w.item_label_rect(item).is_some())
+                .map_or(fence, |w| w.id)
+        } else {
+            fence
+        };
         let Some(w) = self.window_for(fence) else {
             return;
         };
@@ -384,6 +397,14 @@ impl App {
         for f in fences {
             self.refresh_fence(f);
         }
+        if self.is_desktop_view(
+            self.state
+                .config
+                .fence_of_item(self.state.layout, item)
+                .unwrap_or_default(),
+        ) {
+            self.refresh_desktop();
+        }
     }
 
     /// The selection's paths for the shell; see [`shell::paths_for_shell`].
@@ -466,7 +487,18 @@ impl App {
     /// Ctrl+C / Ctrl+X: the shell's copy / cut verb puts the files on the clipboard exactly as
     /// Explorer does (`CF_HDROP` + `Preferred DropEffect`); cut items draw dimmed.
     pub(super) fn clipboard_verb(&mut self, fence: FenceId, items: &[ItemId], cut: bool) {
-        if !self.shell_verb_on_items(fence, items, if cut { "cut" } else { "copy" }, false) {
+        let paths: Vec<_> = self
+            .shell_paths_of(items)
+            .into_iter()
+            .filter(|p| !shell::is_namespace_path(p))
+            .collect();
+        if paths.is_empty() {
+            return;
+        }
+        let refs: Vec<_> = paths.iter().map(|p| p.as_path()).collect();
+        if clipboard::set_files(&refs, cut).is_err()
+            && !self.shell_verb_on_items(fence, items, if cut { "cut" } else { "copy" }, false)
+        {
             return;
         }
         self.cut_items = if cut {
@@ -515,7 +547,20 @@ impl App {
                     copy: true,
                     rename_on_collision: true,
                     owner,
-                    then: FileOpThen::Duplicate,
+                    then: FileOpThen::Duplicate {
+                        to: if self.is_desktop_view(fence) {
+                            uuid::Uuid::nil()
+                        } else {
+                            fence
+                        },
+                        before: std::fs::read_dir(dest)
+                            .into_iter()
+                            .flatten()
+                            .flatten()
+                            .map(|e| e.path())
+                            .collect(),
+                        dest: dest.clone(),
+                    },
                 });
                 return;
             }

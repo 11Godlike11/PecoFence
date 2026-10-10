@@ -29,6 +29,9 @@ pub(super) fn focus_session(view: &RefCell<Option<FenceViewState>>, hwnd: HWND) 
         window::bring_to_front(hwnd);
     }
     if desktop::foreground_window() == hwnd {
+        // MA_NOACTIVATE suppresses the default mouse-to-keyboard focus handoff. Explicit
+        // activation alone can leave this thread's focus null, even with our HWND in front.
+        window::set_focus(hwnd);
         return;
     }
     if let Ok(mut guard) = view.try_borrow_mut()

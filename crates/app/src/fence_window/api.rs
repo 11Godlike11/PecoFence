@@ -16,6 +16,12 @@ impl Drop for FenceWindow {
         // RevokeDragDrop needs a live HWND; otherwise OLE keeps its AddRef'd IDropTarget (and
         // with it the view state and the shadow window) forever.
         self._drop_target.take();
+        if let Ok(guard) = self.view.try_borrow()
+            && let Some(v) = guard.as_ref()
+            && v.desktop
+        {
+            v.behavior.desktop_selection.borrow_mut().remove(&v.active);
+        }
         // The uploaded wallpaper crop is keyed by HWND, which Windows may hand to the next
         // window: drop it so a new fence never starts with this one's backdrop.
         if let Ok(guard) = self.view.try_borrow()
@@ -127,7 +133,15 @@ impl FenceWindow {
             .create(handler)?;
         let hwnd = window.hwnd();
         if desktop {
-            let _ = window::set_hit_regions(hwnd, &[]);
+            let _ = window::set_hit_regions(
+                hwnd,
+                &[RECT {
+                    left: 0,
+                    top: 0,
+                    right: bounds.right - bounds.left,
+                    bottom: height,
+                }],
+            );
         }
         apply_window_shape(hwnd, ctx.theme.borrow().liquid_glass);
         let _ = dwm::set_border_color_none(hwnd);
@@ -411,7 +425,11 @@ impl FenceWindow {
             .unwrap_or_default()
     }
 
-    pub fn select_desktop_rect(&self, rect: RECT, base: &[ItemId]) -> usize {
+    pub fn desktop_scale(&self) -> f32 {
+        self.view.borrow().as_ref().map_or(1.0, |v| v.scale())
+    }
+
+    pub fn select_desktop_rect(&self, rect: RECT, base: &[ItemId], toggle: bool) -> usize {
         let mut guard = self.view.borrow_mut();
         let Some(v) = guard.as_mut() else {
             return 0;
@@ -426,11 +444,15 @@ impl FenceWindow {
             .filter(|(_, (item, cell))| {
                 let x = bounds.left as f32 + cell.x * scale;
                 let y = bounds.top as f32 + cell.y * scale;
-                base.contains(&item.id)
-                    || (x < rect.right as f32
-                        && (rect.left as f32) < x + cell.w * scale
-                        && y < rect.bottom as f32
-                        && (rect.top as f32) < y + cell.h * scale)
+                let inside = x < rect.right as f32
+                    && (rect.left as f32) < x + cell.w * scale
+                    && y < rect.bottom as f32
+                    && (rect.top as f32) < y + cell.h * scale;
+                if toggle {
+                    base.contains(&item.id) ^ inside
+                } else {
+                    base.contains(&item.id) || inside
+                }
             })
             .map(|(i, _)| i)
             .collect();
@@ -441,6 +463,18 @@ impl FenceWindow {
             let _ = v.redraw_content();
         }
         count
+    }
+
+    pub fn select_desktop_all(&self, all: bool) {
+        self.with_view(|v| {
+            v.selected = if all {
+                (0..v.items.len()).collect()
+            } else {
+                HashSet::new()
+            };
+            v.anchor_index = v.selected.iter().min().copied();
+            let _ = v.redraw_content();
+        });
     }
 
     pub fn hwnd(&self) -> HWND {

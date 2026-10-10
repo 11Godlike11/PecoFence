@@ -109,7 +109,7 @@ pub const MARQUEE_MIN_PX: i32 = 48;
 pub enum MarqueeEvent {
     /// The left button went down on the empty desktop (or the desktop was just activated);
     /// `additive` = Ctrl or Shift held, which keeps the current selection.
-    Pressed { additive: bool },
+    Pressed { additive: bool, toggle: bool },
     /// The marquee now spans this screen rectangle (past the drag threshold).
     Moved(RECT),
     /// Released: the final marquee.
@@ -523,6 +523,7 @@ impl DesktopAnchor {
             } else {
                 self.emit_marquee(MarqueeEvent::Pressed {
                     additive: additive_modifier(),
+                    toggle: window::key_down_async(msg::VK_CONTROL),
                 });
             }
         } else {
@@ -721,6 +722,7 @@ impl DesktopAnchor {
             self.quick.marquee_last = None;
             self.emit_marquee(MarqueeEvent::Pressed {
                 additive: additive_modifier(),
+                toggle: window::key_down_async(msg::VK_CONTROL),
             });
         }
         true

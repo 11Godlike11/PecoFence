@@ -467,6 +467,20 @@ impl FenceViewState {
         })
     }
 
+    pub(super) fn desktop_marquee_rect(&self) -> Option<RECT> {
+        if !self.desktop {
+            return None;
+        }
+        let m = self.marquee.as_ref()?;
+        let bounds = window::window_rect(self.hwnd);
+        Some(RECT {
+            left: bounds.left + m.start.0.min(m.cur.0),
+            top: bounds.top + m.start.1.min(m.cur.1),
+            right: bounds.left + m.start.0.max(m.cur.0),
+            bottom: bounds.top + m.start.1.max(m.cur.1),
+        })
+    }
+
     /// Selects the items whose cells intersect the marquee: replacing the selection, adding to
     /// it (Shift) or toggling the banded items (Ctrl), like Explorer.
     pub(super) fn update_marquee_selection(&mut self) {

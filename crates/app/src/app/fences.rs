@@ -499,6 +499,13 @@ impl App {
     /// Menu / Ctrl+wheel: one place that changes a fence's icon size and everything derived
     /// from it (window redraw, cell snap, height fit, auto height, save).
     pub(super) fn apply_icon_size(&mut self, fence: FenceId, size: u32) {
+        if self.is_desktop_view(fence) {
+            self.state.config.settings.icon_size = size;
+            self.state.mark_dirty();
+            self.refresh_desktop();
+            self.schedule_save();
+            return;
+        }
         self.state.set_icon_size(fence, size);
         if let Some(w) = self.window_for(fence)
             && w.active_fence() == fence
@@ -514,7 +521,11 @@ impl App {
     /// Ctrl+wheel: 32 → 48 → 64 → 96, stopping at the ends. 32 / 48 / 96 are the desktop's
     /// small / medium / large; 64 stays as an intermediate step for existing configs.
     pub(super) fn step_icon_size(&mut self, fence: FenceId, larger: bool) {
-        let Some(cur) = self.state.fence(fence).map(|f| f.view.icon_size) else {
+        let Some(cur) = (if self.is_desktop_view(fence) {
+            Some(self.state.config.settings.icon_size)
+        } else {
+            self.state.fence(fence).map(|f| f.view.icon_size)
+        }) else {
             return;
         };
         const SIZES: [u32; 4] = [32, 48, 64, 96];

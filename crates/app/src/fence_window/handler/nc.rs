@@ -845,6 +845,10 @@ pub(super) fn on_dpichanged(
         let mut guard = view.borrow_mut();
         if let Some(v) = guard.as_mut() {
             v.apply_dpi(new_dpi as u32);
+            if v.desktop {
+                h.queue.push(Command::RefreshDesktop);
+                return Some(0);
+            }
         }
     }
     let _ = window::set_window_bounds(

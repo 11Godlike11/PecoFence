@@ -54,6 +54,11 @@ const CMD_FENCE_PASTE: u32 = 342;
 const CMD_FENCE_VIEW_ICONS: u32 = 360;
 const CMD_FENCE_VIEW_LIST: u32 = 361;
 const CMD_FENCE_VIEW_DETAILS: u32 = 362;
+const CMD_DESKTOP_AUTO: u32 = 390;
+const CMD_DESKTOP_GRID: u32 = 391;
+const CMD_DESKTOP_REFRESH: u32 = 392;
+const CMD_DESKTOP_DISPLAY: u32 = 393;
+const CMD_DESKTOP_PERSONALIZE: u32 = 394;
 const CMD_TAB_NEW: u32 = 370;
 const CMD_TAB_DETACH: u32 = 371;
 const CMD_TAB_MOVE_LEFT: u32 = 372;
@@ -226,6 +231,11 @@ impl App {
     }
 
     pub(super) fn show_item_menu(&mut self, fence: FenceId, items: Vec<ItemId>, x: i32, y: i32) {
+        let items = if self.is_desktop_view(fence) {
+            self.selected_desktop_items()
+        } else {
+            items
+        };
         if items.is_empty() {
             return;
         }
@@ -444,6 +454,10 @@ impl App {
     /// spacing, auto height, quick-hide exclusion, dock, portal flags) live on the settings
     /// page's 「栅栏」 tab, reached through 栅栏选项….
     pub(super) fn show_fence_menu(&mut self, fence: FenceId, x: i32, y: i32) {
+        if self.is_desktop_view(fence) {
+            self.show_desktop_menu(fence, x, y);
+            return;
+        }
         // `fence` may be a tab: window-level items (roll, lock) act on its host `h`, content
         // items (view, sort, new, delete) on the fence itself.
         let Some(f) = self.state.fence(fence).cloned() else {
@@ -862,6 +876,112 @@ impl App {
         }
         // An open settings page shows these fences too; keep it current.
         self.push_settings_state();
+    }
+
+    pub(super) fn show_desktop_menu(&mut self, fence: FenceId, x: i32, y: i32) {
+        let settings = &self.state.config.settings;
+        let menu = PopupMenu::new();
+        let view = PopupMenu::new();
+        for (cmd, size, label) in [
+            (CMD_FENCE_ICON_96, 96, "大图标"),
+            (CMD_FENCE_ICON_64, 64, "较大图标"),
+            (CMD_FENCE_ICON_48, 48, "中等图标"),
+            (CMD_FENCE_ICON_32, 32, "小图标"),
+        ] {
+            view.item(cmd, label, settings.icon_size == size, false);
+        }
+        view.separator()
+            .item(
+                CMD_DESKTOP_AUTO,
+                "自动排列图标",
+                settings.desktop_view.auto_arrange,
+                false,
+            )
+            .item(
+                CMD_DESKTOP_GRID,
+                "将图标与网格对齐",
+                settings.desktop_view.align_grid,
+                false,
+            );
+        menu.submenu("查看", view);
+        let sort = PopupMenu::new();
+        for (cmd, mode, label) in [
+            (CMD_FENCE_SORT_NAME, SortMode::Name, "名称"),
+            (CMD_FENCE_SORT_TYPE, SortMode::Type, "项目类型"),
+            (CMD_FENCE_SORT_DATE, SortMode::Date, "修改日期"),
+            (CMD_FENCE_SORT_SIZE, SortMode::Size, "大小"),
+        ] {
+            sort.item(cmd, label, settings.desktop_view.sort == mode, false);
+        }
+        menu.submenu("排序方式", sort)
+            .item(CMD_DESKTOP_REFRESH, "刷新\tF5", false, false)
+            .separator()
+            .item(
+                CMD_FENCE_PASTE,
+                "粘贴\tCtrl+V",
+                false,
+                !clipboard::has_file_list(),
+            );
+        let new = PopupMenu::new();
+        new.item(CMD_FENCE_NEW_FOLDER, "文件夹\tCtrl+Shift+N", false, false)
+            .item(CMD_FENCE_NEW_TEXT, "文本文档", false, false)
+            .separator()
+            .item(CMD_NEW_FENCE_HERE, "虚拟栅栏", false, false);
+        menu.submenu("新建", new)
+            .separator()
+            .item(CMD_DESKTOP_DISPLAY, "显示设置", false, false)
+            .item(CMD_DESKTOP_PERSONALIZE, "个性化", false, false);
+        let owner = self
+            .window_for(fence)
+            .map_or(self.control.hwnd(), |w| w.hwnd());
+        match menu.show_context(owner, x, y) {
+            CMD_FENCE_ICON_32 => self.apply_icon_size(fence, 32),
+            CMD_FENCE_ICON_48 => self.apply_icon_size(fence, 48),
+            CMD_FENCE_ICON_64 => self.apply_icon_size(fence, 64),
+            CMD_FENCE_ICON_96 => self.apply_icon_size(fence, 96),
+            CMD_DESKTOP_AUTO => {
+                self.state.config.settings.desktop_view.auto_arrange =
+                    !settings.desktop_view.auto_arrange;
+                self.state.mark_dirty();
+                self.refresh_desktop();
+                self.schedule_save();
+            }
+            CMD_DESKTOP_GRID => {
+                self.state.config.settings.desktop_view.align_grid =
+                    !settings.desktop_view.align_grid;
+                self.state.mark_dirty();
+                if self.state.config.settings.desktop_view.align_grid {
+                    self.align_desktop_grid();
+                }
+                self.schedule_save();
+            }
+            cmd @ (CMD_FENCE_SORT_NAME | CMD_FENCE_SORT_TYPE | CMD_FENCE_SORT_DATE
+            | CMD_FENCE_SORT_SIZE) => {
+                self.state.config.settings.desktop_view.sort = match cmd {
+                    CMD_FENCE_SORT_TYPE => SortMode::Type,
+                    CMD_FENCE_SORT_DATE => SortMode::Date,
+                    CMD_FENCE_SORT_SIZE => SortMode::Size,
+                    _ => SortMode::Name,
+                };
+                self.state.mark_dirty();
+                self.arrange_desktop();
+            }
+            CMD_DESKTOP_REFRESH => self.manual_refresh(fence),
+            CMD_FENCE_PASTE => self.paste_into(fence),
+            CMD_FENCE_NEW_FOLDER => self.create_desktop_item(fence, true),
+            CMD_FENCE_NEW_TEXT => self.create_desktop_item(fence, false),
+            CMD_NEW_FENCE_HERE => {
+                let rect = self.place_new_fence(3, 200.0, x, y, None);
+                self.create_fence_at(rect, None);
+            }
+            CMD_DESKTOP_DISPLAY => {
+                let _ = shell::shell_execute(Path::new("ms-settings:display"), None, None);
+            }
+            CMD_DESKTOP_PERSONALIZE => {
+                let _ = shell::shell_execute(Path::new("ms-settings:personalization"), None, None);
+            }
+            _ => {}
+        }
     }
 
     /// Right-click on the Details header: Explorer's column chooser (名称 always on).

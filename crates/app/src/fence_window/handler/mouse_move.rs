@@ -25,6 +25,16 @@ pub(super) fn on_mousemove(
     };
     v.set_mouse_inside(true);
     if v.marquee.is_some() {
+        if v.desktop {
+            if let Some(m) = v.marquee.as_mut() {
+                m.cur = (x, y);
+                m.pointer = (x, y);
+            }
+            if let Some(rect) = v.desktop_marquee_rect() {
+                queue.push(Command::DesktopMarquee(anchor::MarqueeEvent::Moved(rect)));
+            }
+            return Some(0);
+        }
         // Pointer outside the item area: auto-scroll per frame while the
         // button is down (`marquee_autoscroll` in `tick`).
         let (top, bottom) = v.marquee_band_px();
@@ -217,9 +227,26 @@ pub(super) fn on_mousemove(
         v.cancel_pending_rename();
         v.hide_tip();
         drag_selection(&mut v.selected, item);
-        let ids = v.selected_ids();
+        let mut ids = v.selected_ids();
         // A Recycle Bin dragged together with files would empty the CF_HDROP for every target.
-        let paths = pecofence_platform::shell::paths_for_shell(v.selected_paths());
+        let mut selected_paths = v.selected_paths();
+        if v.desktop {
+            for (fence, selection) in v.behavior.desktop_selection.borrow().iter() {
+                if *fence != v.active {
+                    for (id, path) in selection {
+                        ids.push(*id);
+                        selected_paths.push(path.clone());
+                    }
+                }
+            }
+        }
+        if v.desktop
+            && let Some(anchor) = v.items.get(item)
+            && let Some(index) = ids.iter().position(|id| *id == anchor.id)
+        {
+            ids.swap(0, index);
+        }
+        let paths = pecofence_platform::shell::paths_for_shell(selected_paths);
         let from = v.active;
         let from_portal = v.is_portal;
         v.ole_drag = true;

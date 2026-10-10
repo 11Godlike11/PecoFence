@@ -26,7 +26,11 @@ pub(super) enum FileOpThen {
         what: &'static str,
     },
     /// Paste into the folder the files already live in ("xxx - 副本").
-    Duplicate,
+    Duplicate {
+        to: FenceId,
+        dest: PathBuf,
+        before: HashSet<PathBuf>,
+    },
     /// A rename the filesystem refused, retried through the shell for its permission prompt.
     /// The folder watcher pairs the rename, so the item keeps its fence.
     Rename,
@@ -176,7 +180,7 @@ impl App {
                     ));
                 }
             },
-            FileOpThen::Duplicate => {
+            FileOpThen::Duplicate { to, dest, before } => {
                 match &result {
                     Ok(true) => tracing::info!("pasted duplicates"),
                     Ok(false) => tracing::info!("paste cancelled by user"),
@@ -189,6 +193,27 @@ impl App {
                     }
                 }
                 self.refresh_portals();
+                if result == Ok(true) && self.state.portal_path(to).is_none() {
+                    for path in std::fs::read_dir(dest)
+                        .into_iter()
+                        .flatten()
+                        .flatten()
+                        .map(|e| e.path())
+                        .filter(|p| !before.contains(p))
+                    {
+                        self.pending_routes.push(PendingRoute {
+                            fence: to,
+                            path,
+                            since: Instant::now(),
+                            rename: false,
+                            desktop_position: None,
+                        });
+                    }
+                    self.sync_desktop_if_available("paste duplicates");
+                    self.route_pending_creation();
+                    self.refresh_all();
+                    self.schedule_save();
+                }
             }
             FileOpThen::Rename => match &result {
                 Ok(true) => tracing::info!("item renamed through the shell"),

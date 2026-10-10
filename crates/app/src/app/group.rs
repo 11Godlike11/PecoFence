@@ -10,7 +10,8 @@ use crate::anchor::{MARQUEE_MIN_PX, MarqueeEvent};
 impl App {
     pub(super) fn on_desktop_marquee(&mut self, event: MarqueeEvent) {
         match event {
-            MarqueeEvent::Pressed { additive } => {
+            MarqueeEvent::Pressed { additive, toggle } => {
+                self.desktop_marquee_toggle = toggle;
                 self.desktop_marquee_base = self
                     .desktop_windows
                     .values()
@@ -31,7 +32,7 @@ impl App {
                         .get(&w.id)
                         .cloned()
                         .unwrap_or_default();
-                    w.select_desktop_rect(RECT::default(), &base);
+                    w.select_desktop_rect(RECT::default(), &base, toggle);
                 }
                 let kept = if additive {
                     self.ctx.behavior.selection.borrow().clone()
@@ -50,7 +51,7 @@ impl App {
                         .get(&w.id)
                         .cloned()
                         .unwrap_or_default();
-                    w.select_desktop_rect(rect, &base);
+                    w.select_desktop_rect(rect, &base, self.desktop_marquee_toggle);
                 }
                 let selection = self.marquee_selection(rect);
                 self.set_fence_selection(selection);
@@ -69,7 +70,7 @@ impl App {
                             .get(&w.id)
                             .cloned()
                             .unwrap_or_default();
-                        w.select_desktop_rect(rect, &base)
+                        w.select_desktop_rect(rect, &base, self.desktop_marquee_toggle)
                     })
                     .sum();
                 self.desktop_marquee_base.clear();
@@ -91,6 +92,7 @@ impl App {
             MarqueeEvent::Cancelled => {
                 self.hide_marquee_band();
                 self.marquee_base = None;
+                self.desktop_marquee_base.clear();
             }
         }
     }

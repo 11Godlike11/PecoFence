@@ -102,6 +102,8 @@ pub struct Settings {
     #[serde(default)]
     pub title_align: TitleAlign,
     pub icon_size: u32,
+    #[serde(default)]
+    pub desktop_view: DesktopView,
     pub quick_hide: QuickHideSettings,
     pub roll_up: RollUpSettings,
     pub show_desktop: ShowDesktopSetting,
@@ -148,6 +150,26 @@ impl Default for PeekSettings {
     }
 }
 
+/// Loose desktop icons have their own arrangement, independent of virtual fences.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(default, rename_all = "camelCase")]
+pub struct DesktopView {
+    pub align_grid: bool,
+    pub auto_arrange: bool,
+    pub sort: SortMode,
+}
+
+impl Default for DesktopView {
+    fn default() -> Self {
+        Self {
+            align_grid: true,
+            auto_arrange: false,
+            sort: SortMode::Name,
+        }
+    }
+}
+
 /// Peek hotkey choices. Fences uses Win+Space, but Windows reserves Win+Space (and
 /// Win+Shift/Ctrl+Space) for the input-language switcher whenever more than one keyboard
 /// layout is installed, so Ctrl+Alt+Space is the default and the others are offered.
@@ -170,6 +192,7 @@ impl Default for Settings {
             theme_style: ThemeStyle::Fluent,
             title_align: TitleAlign::Left,
             icon_size: 48,
+            desktop_view: DesktopView::default(),
             quick_hide: QuickHideSettings::default(),
             roll_up: RollUpSettings::default(),
             show_desktop: ShowDesktopSetting::KeepVisible,

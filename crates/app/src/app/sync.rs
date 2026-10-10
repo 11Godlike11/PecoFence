@@ -132,6 +132,29 @@ impl App {
     /// Explorer's refresh.
     pub(super) fn manual_refresh(&mut self, fence: FenceId) {
         let host = self.state.host_of(fence);
+        if self.is_desktop_view(fence) {
+            self.sync_desktop_if_available("desktop refresh");
+            self.route_pending_creation();
+            let keys: Vec<_> = self
+                .state
+                .loose_items()
+                .iter()
+                .map(|it| it.icon_key.clone())
+                .collect();
+            for k in keys {
+                self.ctx.icons.borrow_mut().invalidate(&k);
+                self.ctx
+                    .bitmaps
+                    .borrow_mut()
+                    .remove_prefix(&IconCache::cache_key(&k));
+            }
+            for w in self.desktop_windows.values() {
+                w.drop_icons();
+            }
+            self.refresh_desktop();
+            self.push_workspace_summary();
+            return;
+        }
         let active = self.state.active_tab_of(host);
         if self.state.portal_path(active).is_some() {
             self.state.refresh_portal(active);

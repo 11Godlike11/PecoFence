@@ -196,6 +196,14 @@ pub(super) fn on_lbuttondown(
             return Some(0);
         }
         let hit = v.hit_item(x, y);
+        if v.desktop && hit.is_none() && in_content {
+            queue.push(Command::DesktopMarquee(anchor::MarqueeEvent::Pressed {
+                additive: ctrl || shift,
+                toggle: ctrl,
+            }));
+        } else if v.desktop && !ctrl && !shift && hit.is_some_and(|i| !v.selected.contains(&i)) {
+            queue.push(Command::ClearDesktopSelection { except: v.active });
+        }
         let mut capture = false;
         match hit {
             Some(i) => {
@@ -342,6 +350,11 @@ pub(super) fn on_lbuttonup(
         let mut guard = view.borrow_mut();
         match guard.as_mut() {
             Some(v) => {
+                if let Some(rect) = v.desktop_marquee_rect() {
+                    queue.push(Command::DesktopMarquee(anchor::MarqueeEvent::Released(
+                        rect,
+                    )));
+                }
                 let tab_drag = v.tab_drag.take().map(|td| {
                     // The pill settles from under the pointer into its slot.
                     v.settle_dragged_tab(&td);
@@ -424,6 +437,9 @@ pub(super) fn on_lbuttonup(
     if let Some(d) = drag {
         if d.collapse_on_up {
             v.select_only(d.item);
+            if v.desktop {
+                queue.push(Command::ClearDesktopSelection { except: v.active });
+            }
             need_content = true;
         } else if d.deselect_on_up {
             release_item(
@@ -501,6 +517,9 @@ pub(super) fn on_capturechanged(
             }
         }
         let marquee = v.end_marquee();
+        if marquee && v.desktop {
+            queue.push(Command::DesktopMarquee(anchor::MarqueeEvent::Cancelled));
+        }
         // Losing capture mid tab-drag still commits the order shown.
         if let Some(td) = v.tab_drag.take() {
             v.settle_dragged_tab(&td);
@@ -587,6 +606,8 @@ pub(super) fn on_lbuttondblclk(
             }
         } else if v.tab_at(x, y).is_some() {
             queue.push(Command::ToggleRollUp(fence_id));
+        } else if v.desktop {
+            queue.push(Command::DesktopDoubleClick);
         }
     }
     Some(0)
@@ -669,6 +690,9 @@ pub(super) fn on_rbuttonup(
     match v.hit_item(x, y) {
         Some(i) => {
             if !v.selected.contains(&i) {
+                if v.desktop {
+                    queue.push(Command::ClearDesktopSelection { except: v.active });
+                }
                 v.selected.clear();
                 v.selected.insert(i);
                 v.anchor_index = Some(i);
@@ -689,11 +713,21 @@ pub(super) fn on_rbuttonup(
             focus_session(view, hwnd);
             queue.push(cmd);
         }
-        None => queue.push(Command::FenceMenu {
-            fence: v.active,
-            x: pt.x,
-            y: pt.y,
-        }),
+        None => {
+            if v.desktop {
+                v.selected.clear();
+                let _ = v.redraw_content();
+                queue.push(Command::ClearDesktopSelection { except: v.active });
+            }
+            let cmd = Command::FenceMenu {
+                fence: v.active,
+                x: pt.x,
+                y: pt.y,
+            };
+            drop(guard);
+            focus_session(view, hwnd);
+            queue.push(cmd);
+        }
     }
     Some(0)
 }

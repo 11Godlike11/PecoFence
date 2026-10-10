@@ -758,6 +758,19 @@ impl FenceViewState {
     }
 
     pub(super) fn redraw_content(&mut self) -> Result<()> {
+        if self.desktop {
+            let selection = self
+                .items
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| self.selected.contains(i))
+                .map(|(_, it)| (it.id, it.path.clone()))
+                .collect();
+            self.behavior
+                .desktop_selection
+                .borrow_mut()
+                .insert(self.active, selection);
+        }
         if self.rolled_up && self.roll_anim.is_none() {
             self.content_dirty = true;
             return Ok(());
@@ -886,7 +899,11 @@ impl FenceViewState {
                 Some(self.empty_text())
             },
             drop_highlight: self.drop_wash.value_at(now),
-            marquee: self.marquee_rect_dip(),
+            marquee: if self.desktop {
+                None
+            } else {
+                self.marquee_rect_dip()
+            },
             insert_caret: self.insert_caret_dip(0.0),
             insert_caret_alpha: self.caret_alpha.value_at(now),
             selection_inactive: self.selection_inactive_now(now),
@@ -905,36 +922,17 @@ impl FenceViewState {
                 &content,
             )
         })?;
-        let full_lines = full.map(|(_, lines)| lines);
         self.note_draw_result(ok);
         self.note_content_fades(now);
         if self.desktop {
-            let regions: Vec<_> = self
-                .desktop_cells
-                .iter()
-                .enumerate()
-                .map(|(i, cell)| {
-                    let expanded = if shortened == Some(i) {
-                        full_lines.map_or(cell.h, |lines| {
-                            cell.h.max(
-                                grid.metrics.icon_top
-                                    + grid.metrics.icon
-                                    + grid.metrics.label_gap
-                                    + lines as f32 * grid.metrics.line_h
-                                    + 4.0,
-                            )
-                        })
-                    } else {
-                        cell.h
-                    };
-                    RECT {
-                        left: (cell.x * scale).floor() as i32,
-                        top: (cell.y * scale).floor() as i32,
-                        right: ((cell.x + cell.w) * scale).ceil() as i32,
-                        bottom: ((cell.y + expanded) * scale).ceil() as i32,
-                    }
-                })
-                .collect();
+            // A single input owner for both icons and empty desktop space. The material is
+            // still transparent; only the window's input region covers the work area.
+            let regions = vec![RECT {
+                left: 0,
+                top: 0,
+                right: cw,
+                bottom: ch,
+            }];
             if self.desktop_regions != regions && window::set_hit_regions(self.hwnd, &regions) {
                 self.desktop_regions = regions;
             }

@@ -85,6 +85,32 @@ pub(super) fn on_keydown(
     const VK_X: u32 = 0x58;
     const VK_F5: u32 = 0x74;
     const VK_SPACE: u32 = 0x20;
+    if v.desktop {
+        let action = match vk {
+            VK_A if ctrl => Some(DesktopAction::SelectAll),
+            VK_C | VK_X if ctrl => Some(DesktopAction::Copy { cut: vk == VK_X }),
+            k if k == msg::VK_DELETE => Some(DesktopAction::Delete { permanent: shift }),
+            k if k == msg::VK_RETURN => Some(DesktopAction::Open),
+            k if k == msg::VK_F2 => Some(DesktopAction::Rename),
+            _ => None,
+        };
+        if let Some(action) = action {
+            queue.push(Command::DesktopAction {
+                fence: v.active,
+                action,
+            });
+            return Some(0);
+        }
+        if !ctrl
+            && !shift
+            && matches!(
+                vk,
+                VK_LEFT | VK_RIGHT | VK_UP | VK_DOWN | VK_PRIOR | VK_NEXT | VK_HOME | VK_END
+            )
+        {
+            queue.push(Command::ClearDesktopSelection { except: v.active });
+        }
+    }
     let mode = cursor_mode(shift, ctrl);
     // Navigation keys are swallowed while the scrollbar thumb / track /
     // arrow is held: the direct manipulation owns the offset (Esc below
@@ -197,6 +223,15 @@ pub(super) fn on_keydown(
                 return Some(0);
             }
             v.selected.clear();
+            if v.desktop {
+                queue.push(Command::DesktopAction {
+                    fence: v.active,
+                    action: DesktopAction::Clear,
+                });
+                if v.marquee.is_some() {
+                    queue.push(Command::DesktopMarquee(anchor::MarqueeEvent::Cancelled));
+                }
+            }
             v.type_ahead.clear();
             if !h.behavior.selection.borrow().is_empty() {
                 queue.push(Command::ClearFenceSelection);
@@ -258,6 +293,13 @@ pub(super) fn on_syskeydown(
     let guard = view.borrow();
     let v = guard.as_ref()?;
     if vk == msg::VK_RETURN {
+        if v.desktop {
+            queue.push(Command::DesktopAction {
+                fence: v.active,
+                action: DesktopAction::Properties,
+            });
+            return Some(0);
+        }
         let ids = v.selected_ids();
         if !ids.is_empty() {
             queue.push(Command::ItemProperties {

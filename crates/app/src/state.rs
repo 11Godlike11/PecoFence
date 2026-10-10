@@ -480,7 +480,22 @@ impl AppState {
                     && self.config.fence_of_item(self.layout, it.id).is_none()
             })
             .collect();
-        items.sort_by(|a, b| natural_cmp(&a.display_name, &b.display_name));
+        items.sort_by(|a, b| {
+            let order = match self.config.settings.desktop_view.sort {
+                SortMode::Type => {
+                    (!a.is_folder, ext_of_key(&a.key)).cmp(&(!b.is_folder, ext_of_key(&b.key)))
+                }
+                SortMode::Date => b.mtime.cmp(&a.mtime),
+                SortMode::Size => (!a.is_folder, std::cmp::Reverse(a.size))
+                    .cmp(&(!b.is_folder, std::cmp::Reverse(b.size))),
+                SortMode::OpenCount => b.open_count.cmp(&a.open_count),
+                _ => std::cmp::Ordering::Equal,
+            };
+            (!a.is_namespace())
+                .cmp(&(!b.is_namespace()))
+                .then(order)
+                .then_with(|| natural_cmp(&a.display_name, &b.display_name))
+        });
         items
     }
 
