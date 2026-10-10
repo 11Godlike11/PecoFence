@@ -1410,17 +1410,7 @@ impl AppState {
 
     /// Re-runs the rules over every item (user assignments are respected).
     pub fn apply_rules_all(&mut self, entries: &[DesktopEntry]) -> usize {
-        self.apply_rules_filtered(entries, false)
-    }
-
-    /// The hourly sweep for clock-dependent rules: only an item whose winning rule has an
-    /// idle-days condition moves, so a later-added type rule still waits for "立即应用".
-    pub fn apply_idle_rules(&mut self, entries: &[DesktopEntry]) -> usize {
-        self.apply_rules_filtered(entries, true)
-    }
-
-    fn apply_rules_filtered(&mut self, entries: &[DesktopEntry], idle_only: bool) -> usize {
-        let plan = self.plan_rules(entries, idle_only);
+        let plan = self.plan_rules(entries);
         let mut moved = 0;
         for m in plan {
             if self
@@ -1439,8 +1429,8 @@ impl AppState {
 
     /// What [`apply_rules_all`](Self::apply_rules_all) would do, without doing it: one entry per
     /// item that is not pinned by a manual placement and whose rule target differs from the
-    /// fence it is in now (`idle_only`: see [`apply_idle_rules`](Self::apply_idle_rules)).
-    pub fn plan_rules(&self, entries: &[DesktopEntry], idle_only: bool) -> Vec<PlannedRuleMove> {
+    /// fence it is in now.
+    pub fn plan_rules(&self, entries: &[DesktopEntry]) -> Vec<PlannedRuleMove> {
         let mut plan = Vec::new();
         for entry in entries {
             if entry.origin == EntryOrigin::Namespace {
@@ -1465,20 +1455,6 @@ impl AppState {
                 continue;
             }
             let decision = self.config.rules.evaluate(&self.facts_for(entry));
-            if idle_only {
-                let by_idle_rule = match decision {
-                    Decision::Route { rule, .. } => self
-                        .config
-                        .rules
-                        .list
-                        .iter()
-                        .any(|r| r.id == rule && Self::has_idle_cond(r)),
-                    _ => false,
-                };
-                if !by_idle_rule {
-                    continue;
-                }
-            }
             let Some((to, by)) = self.target_fence(decision) else {
                 continue;
             };

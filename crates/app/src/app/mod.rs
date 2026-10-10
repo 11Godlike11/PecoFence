@@ -253,8 +253,6 @@ pub struct App {
     peek: Option<PeekOverlay>,
     /// The desktop folder could not be read at the last sync (removable / network drive).
     desktop_unavailable: bool,
-    /// Last run of the rules that depend on the clock ("闲置天数"); see `housekeeping`.
-    idle_rules_checked: Option<Instant>,
     /// Fingerprint of the snapshot the current backdrops were built from.
     wallpaper_sig: Option<String>,
     wallpaper_cache: BackdropCache,
@@ -977,7 +975,6 @@ impl App {
             peek_hotkey: None,
             peek_hotkey_wanted: None,
             desktop_unavailable: false,
-            idle_rules_checked: None,
             cut_items: HashSet::new(),
             cut_clip_seq: 0,
             wallpaper_sig,
@@ -1170,27 +1167,8 @@ impl App {
                 self.push_workspace_summary();
             }
         }
-        // Rules with an idle-days condition depend on the clock, not on desktop events: while
-        // automatic filing is on, re-run the rules on the first tick and then hourly.
-        let idle_rules_due = {
-            let rules = &self.state.config.rules;
-            rules.keep_updated
-                && rules.has_idle_rules()
-                && !self.desktop_unavailable
-                && self
-                    .idle_rules_checked
-                    .is_none_or(|t| t.elapsed() >= Duration::from_secs(3600))
-        };
-        if idle_rules_due {
-            self.idle_rules_checked = Some(Instant::now());
-            let entries = shell::enumerate_desktop();
-            let moved = self.state.apply_idle_rules(&entries);
-            if moved > 0 {
-                tracing::info!(moved, "idle-days rules re-applied");
-                self.refresh_all();
-                self.schedule_save();
-            }
-        }
+        // Automatic filing only handles arrivals in sync_desktop. Clock-dependent rules
+        // for existing items run only when the user explicitly applies the rules.
         // A DPI that settled late re-lays the window out; its rectangle stays (the rows and
         // columns share the rest, so it still shows whole icons).
         for window in self.fences.values().chain(self.desktop_windows.values()) {

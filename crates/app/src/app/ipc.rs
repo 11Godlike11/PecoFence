@@ -768,7 +768,7 @@ impl App {
             }
             Method::RulesApply { dry_run } => {
                 let entries = shell::enumerate_desktop();
-                let plan = self.state.plan_rules(&entries, false);
+                let plan = self.state.plan_rules(&entries);
                 let moves: Vec<PlannedMoveDto> =
                     plan.iter().map(|m| self.planned_move_dto(m)).collect();
                 if *dry_run {
