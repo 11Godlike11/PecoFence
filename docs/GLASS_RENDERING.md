@@ -1,4 +1,4 @@
-# Personal Liquid Glass renderer (we.5)
+# Personal Liquid Glass renderer (we.6)
 
 This is a Windows Direct2D approximation of Apple's material, not Apple's shader
 or a demonstrated pixel-perfect reproduction. The current renderer was rebuilt
@@ -41,6 +41,9 @@ Map generation skips the flat interior and reuses precomputed polygon segments.
 The CPU shadow obtains antialiased coverage from the same corner polygon using
 a binary sector lookup. Liquid Glass labels use adaptive foreground colors
 without the former four-offset white/black halo.
+The single-title hover state and fold glyph no longer add an independent glass
+capsule or circular rim across the fence corners. Hover/press feedback remains
+in the outer material and glyph color; multi-tab lenses retain their tab feedback.
 
 ## Sources and attribution
 
@@ -87,3 +90,7 @@ stage timings, not a release FPS guarantee. Native input checks exercised
 hover-open followed by arrow-close, suppression of hover reopening after manual
 collapse, and reversing an in-flight fold by clicking again. Geometry tests
 cover intermediate fold heights and agreement between shadow coverage and clip.
+
+The we.6 header change was compared before/after at 125% DPI over the same saved
+wallpaper using the GPU preview's `title-hover` mode. It removes the separate
+header capsule and fold-button circle without changing the outer optical model.

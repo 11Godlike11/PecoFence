@@ -1,7 +1,7 @@
 # Wallpaper Engine personal build
 
 This fork adds live Wallpaper Engine backgrounds to **Liquid Glass**. Version
-`0.1.5-we.5` is based on upstream PecoFence 0.1.5. The GPU optics now use
+`0.1.5-we.6` is based on upstream PecoFence 0.1.5. The GPU optics now use
 continuous superellipse corners, a flat face, curved edge displacement, subtle
 interior frost and narrow directional glints. The material and Windows compositor
 clip share the same silhouette. Whole-face magnification and the previous broad

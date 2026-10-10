@@ -2,6 +2,7 @@
 //! Args: output.bmp left top width height dpi-scale [gpu] [tab-mode] [title-size]
 //! `--background image` renders over that image instead, as one monitor at its own size
 //! placed at the desktop origin (for comparisons over detailed backgrounds).
+//! `title-hover` is a single-title header with its fold control hovered.
 use pecofence_platform::{com::OleGuard, wallpaper, window};
 use pecofence_render::{
     BitmapCache, Image, Matrix3x2, MonitorBackdrop, Theme, WallpaperPosition,
@@ -114,7 +115,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let material = RefCell::new(GpuGlass::default());
     let tab_mode = args.get(8).map(String::as_str).unwrap_or("");
     let title_size = args.get(9).and_then(|s| s.parse::<u8>().ok()).unwrap_or(1);
-    let tabs: Vec<_> = if tab_mode.is_empty() {
+    let tabs: Vec<_> = if tab_mode.is_empty() || tab_mode == "title-hover" {
         Vec::new()
     } else {
         let mut x = 8.0;
@@ -203,6 +204,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             TitleDeco::default(),
             TitleState {
                 title: 1.0,
+                hover: if tab_mode == "title-hover" { 1.0 } else { 0.0 },
+                chevron_hover: if tab_mode == "title-hover" { 1.0 } else { 0.0 },
                 ..Default::default()
             },
             FenceStyle {

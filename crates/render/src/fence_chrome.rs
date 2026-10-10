@@ -1488,19 +1488,16 @@ impl FenceChrome {
         }
 
         // No header band, no divider: the title sits directly on the glass. Hovering a
-        // single-title fence shows an inset pill (SubtleFill, 83 ms fade), never a full-width
-        // strip; a tab strip gets its feedback from the individual tab pills instead.
-        if pill_a > 0.0 && tabs.len() <= 1 {
+        // Fluent shows an inset hover pill; Liquid Glass keeps one continuous outer
+        // lens rather than superimposing a capsule whose corners cut across the rim.
+        // A tab strip gets its feedback from the individual tab pills instead.
+        if pill_a > 0.0 && tabs.len() <= 1 && !theme.liquid_glass {
             let row = Rect::from_xywh(4.0, 4.0, (width - 8.0).max(0.0), (title_h - 8.0).max(0.0));
-            if theme.liquid_glass {
-                draw_header_glass(session, &backdrop, theme, scale, 1, row, 0.28, pill_a)?;
-            } else {
-                let pill = session.create_solid_brush(with_alpha(theme.subtle_hover, pill_a))?;
-                session.fill_rounded_rect(
-                    &RoundedRect::uniform(row, header_control_radius(theme, row)),
-                    &pill,
-                );
-            }
+            let pill = session.create_solid_brush(with_alpha(theme.subtle_hover, pill_a))?;
+            session.fill_rounded_rect(
+                &RoundedRect::uniform(row, header_control_radius(theme, row)),
+                &pill,
+            );
         }
 
         if state.merge_hint > 0.0 {
@@ -1848,27 +1845,13 @@ impl FenceChrome {
             let box_r = TitleDeco::chevron_box(width, title_h);
             let foreground =
                 header_foreground(&backdrop, theme, 7, box_r, scale, opacity, style.tint);
-            if theme.liquid_glass && (state.chevron_pressed || state.chevron_hover > 0.0) {
-                draw_header_glass(
-                    session,
-                    &backdrop,
-                    theme,
-                    scale,
-                    4,
-                    box_r,
-                    if state.chevron_pressed { 0.85 } else { 0.45 },
-                    chevron_a
-                        * if state.chevron_pressed {
-                            1.0
-                        } else {
-                            state.chevron_hover
-                        },
-                )?;
-            } else if state.chevron_pressed {
+            // The fold glyph belongs to the outer lens. An extra circular glass
+            // button overlaps its upper-right corner and creates a second rim.
+            if !theme.liquid_glass && state.chevron_pressed {
                 let pill =
                     session.create_solid_brush(with_alpha(theme.subtle_pressed, chevron_a))?;
                 session.fill_rounded_rect(&RoundedRect::uniform(box_r, 4.0), &pill);
-            } else if state.chevron_hover > 0.0 {
+            } else if !theme.liquid_glass && state.chevron_hover > 0.0 {
                 let pill = session.create_solid_brush(with_alpha(
                     theme.subtle_hover,
                     state.chevron_hover * chevron_a,
