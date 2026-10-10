@@ -1,6 +1,8 @@
 //! Capture actual WPE frames without touching the desktop or application configuration.
 //! cargo run -p pecofence-platform --example live_wallpaper_probe -- <output-directory>
-use pecofence_platform::live_wallpaper::{CapturedWallpaper, LiveWallpaper, capture_once};
+use pecofence_platform::live_wallpaper::{
+    CapturedWallpaper, LiveWallpaper, capture_gpu_once, capture_once,
+};
 use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
@@ -32,10 +34,19 @@ fn save_bmp(path: &Path, frame: &CapturedWallpaper) -> std::io::Result<()> {
 
 fn main() {
     pecofence_platform::window::set_process_dpi_awareness_v2();
+    let _com = pecofence_platform::com::MtaGuard::init().unwrap();
+    let gpu = std::env::args().any(|s| s == "--gpu");
+    let capture = || {
+        if gpu {
+            capture_gpu_once().unwrap()
+        } else {
+            capture_once()
+        }
+    };
     let output = std::env::args().nth(1).expect("output directory required");
     let output = Path::new(&output);
     std::fs::create_dir_all(output).unwrap();
-    let first = capture_once();
+    let first = capture();
     assert!(
         !first.is_empty(),
         "No supported Wallpaper Engine surface found"
@@ -57,7 +68,7 @@ fn main() {
         );
     }
     std::thread::sleep(Duration::from_millis(750));
-    let second = capture_once();
+    let second = capture();
     for (i, frame) in second.iter().enumerate() {
         save_bmp(&output.join(format!("second-{i}.bmp")), frame).unwrap();
     }

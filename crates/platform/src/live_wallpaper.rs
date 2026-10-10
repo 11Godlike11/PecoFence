@@ -1,6 +1,7 @@
-//! Wallpaper Engine window capture. Only WPE desktop descendants are eligible: never
-//! capture the screen, Explorer's icon host, or a PecoFence window (feedback).
-//! PrintWindow stays on a worker because it can block in the other process.
+//! Wallpaper Engine capture. Modern Explorer embeds WPE as a child of Progman, which
+//! Windows Graphics Capture cannot target directly. Capture that desktop root only when
+//! its real icon layer is hidden; top-level fences and foreground apps are not included.
+//! Legacy/web surfaces can still use PrintWindow on the worker.
 
 use crate::{bindings::*, desktop, wide::from_wide};
 use std::{
@@ -53,13 +54,17 @@ fn wpe_process(hwnd: HWND) -> bool {
     }
 }
 
+fn is_wpe_render_class(class: &str) -> bool {
+    class.starts_with("WPEDesktop") || class == "WPEVideoWallpaper"
+}
+
 fn is_wpe_descendant(mut hwnd: HWND) -> bool {
     // Bound the ancestry walk in case another process destroys/reparents a window.
     for _ in 0..16 {
         if hwnd.0.is_null() {
             break;
         }
-        if desktop::class_name(hwnd).starts_with("WPEDesktop") && wpe_process(hwnd) {
+        if is_wpe_render_class(&desktop::class_name(hwnd)) && wpe_process(hwnd) {
             return true;
         }
         // SAFETY: GetParent accepts an HWND; stale handles simply stop the walk.
@@ -73,7 +78,7 @@ unsafe extern "system" fn collect(hwnd: HWND, data: LPARAM) -> BOOL {
     // CEF's intermediate GPU child has the real pixels; its parent prints black. Native
     // scene/video roots can be tried too, but unsupported renderers fall back to static.
     if desktop::is_visible(hwnd)
-        && (class == "Intermediate D3D Window" || class.starts_with("WPEDesktop"))
+        && (class == "Intermediate D3D Window" || is_wpe_render_class(&class))
         && is_wpe_descendant(hwnd)
     {
         // SAFETY: discovery passes a live Vec pointer synchronously to EnumWindows/children.
@@ -91,7 +96,7 @@ unsafe extern "system" fn collect_top(hwnd: HWND, data: LPARAM) -> BOOL {
     true.into()
 }
 
-fn discover() -> Vec<HWND> {
+fn discover_wpe() -> Vec<HWND> {
     let mut windows = Vec::new();
     // SAFETY: both callbacks complete before the stack-owned Vec goes away.
     unsafe {
@@ -117,6 +122,29 @@ fn discover() -> Vec<HWND> {
     windows
 }
 
+fn discover() -> Vec<HWND> {
+    let mut targets = Vec::new();
+    for hwnd in discover_wpe() {
+        let root = desktop::root_ancestor(hwnd);
+        let class = desktop::class_name(root);
+        let shell = desktop::shell_window();
+        let clean_root = (class == "Progman" || class == "WorkerW")
+            && desktop::window_pid(root) == desktop::window_pid(shell)
+            && crate::shell_icons::desktop_icons_hidden();
+        let target = if clean_root { root } else { hwnd };
+        if !targets.contains(&target) {
+            targets.push(target);
+        }
+    }
+    targets
+}
+
+fn engine_running() -> bool {
+    desktop::top_level_windows()
+        .into_iter()
+        .any(|hwnd| desktop::class_name(hwnd) == "WPETrayWindow" && wpe_process(hwnd))
+}
+
 fn capture_rect(hwnd: HWND) -> Option<RECT> {
     if !desktop::is_visible(hwnd) {
         return None;
@@ -131,7 +159,7 @@ fn capture_rect(hwnd: HWND) -> Option<RECT> {
     (w >= 100 && h >= 100 && w * h <= 33_177_600).then_some(r)
 }
 
-struct Surface {
+struct GdiSurface {
     hwnd: HWND,
     dc: HDC,
     bitmap: HBITMAP,
@@ -141,7 +169,7 @@ struct Surface {
     height: i32,
 }
 
-impl Surface {
+impl GdiSurface {
     fn new(hwnd: HWND, r: RECT) -> Result<Self> {
         let (width, height) = (r.right - r.left, r.bottom - r.top);
         // SAFETY: the worker owns all GDI objects and frees them on failure or Drop. The
@@ -235,7 +263,7 @@ impl Surface {
     }
 }
 
-impl Drop for Surface {
+impl Drop for GdiSurface {
     fn drop(&mut self) {
         // SAFETY: owned objects, restored before deleting the selected bitmap.
         unsafe {
@@ -247,22 +275,107 @@ impl Drop for Surface {
 }
 
 /// Synchronous diagnostic entry point. Production uses the bounded worker below.
+enum Backend {
+    Gpu(crate::gpu_wallpaper::GpuSurface),
+    Gdi(GdiSurface),
+}
+
+struct Surface {
+    hwnd: HWND,
+    width: i32,
+    height: i32,
+    backend: Backend,
+    failed: bool,
+}
+
+impl Surface {
+    fn new(hwnd: HWND, r: RECT) -> Result<Self> {
+        let backend = match crate::gpu_wallpaper::GpuSurface::new(hwnd) {
+            Ok(surface) => {
+                tracing::info!(class = %desktop::class_name(hwnd), handle = hwnd.0 as usize,
+                    "Wallpaper Engine Windows Graphics Capture connected");
+                Backend::Gpu(surface)
+            }
+            Err(error) if is_wpe_descendant(hwnd) => {
+                tracing::debug!(%error, "GPU child not capturable; trying web PrintWindow");
+                Backend::Gdi(GdiSurface::new(hwnd, r)?)
+            }
+            Err(error) => return Err(error),
+        };
+        Ok(Self {
+            hwnd,
+            width: r.right - r.left,
+            height: r.bottom - r.top,
+            backend,
+            failed: false,
+        })
+    }
+
+    fn capture(&mut self) -> Option<CapturedWallpaper> {
+        let r = capture_rect(self.hwnd)?;
+        if (r.right - r.left, r.bottom - r.top) != (self.width, self.height) {
+            return None;
+        }
+        match &mut self.backend {
+            Backend::Gpu(gpu) => match gpu.capture(r.left, r.top) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    self.failed = true;
+                    tracing::warn!(%error, "Wallpaper Engine GPU capture failed; reconnecting");
+                    None
+                }
+            },
+            Backend::Gdi(gdi) => gdi.capture(),
+        }
+    }
+}
+
 pub fn capture_once() -> Vec<CapturedWallpaper> {
-    discover()
+    let _com = crate::com::MtaGuard::init().ok();
+    let mut surfaces: Vec<_> = discover()
         .into_iter()
-        .filter_map(|h| Surface::new(h, capture_rect(h)?).ok()?.capture())
-        .collect()
+        .filter_map(|h| Surface::new(h, capture_rect(h)?).ok())
+        .collect();
+    // GPU sessions asynchronously receive the first frame.
+    let until = Instant::now() + Duration::from_secs(1);
+    loop {
+        let images: Vec<_> = surfaces.iter_mut().filter_map(Surface::capture).collect();
+        if !images.is_empty() || surfaces.is_empty() || Instant::now() >= until {
+            return images;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// GPU capture diagnostic, including native scene wallpapers.
+pub fn capture_gpu_once() -> Result<Vec<CapturedWallpaper>> {
+    let mut images = Vec::new();
+    for hwnd in discover() {
+        let mut surface = crate::gpu_wallpaper::GpuSurface::new(hwnd)?;
+        let until = Instant::now() + Duration::from_millis(1000);
+        while Instant::now() < until {
+            let Some(r) = capture_rect(hwnd) else { break };
+            if let Some(frame) = surface.capture(r.left, r.top)? {
+                images.push(frame);
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+    Ok(images)
 }
 
 struct Shared {
     enabled: AtomicBool,
     stop: AtomicBool,
+    engine_running: AtomicBool,
     latest: Mutex<Option<WallpaperFrame>>,
 }
 
 /// Capacity-one mailbox: a slow UI drops old frames, never queues unlimited images.
 pub struct LiveWallpaper {
     shared: Arc<Shared>,
+    thread: Option<thread::JoinHandle<()>>,
     pub interval_ms: u32,
 }
 
@@ -283,12 +396,16 @@ impl LiveWallpaper {
         let shared = Arc::new(Shared {
             enabled: AtomicBool::new(false),
             stop: AtomicBool::new(false),
+            engine_running: AtomicBool::new(false),
             latest: Mutex::new(None),
         });
         let worker = shared.clone();
         let spawned = thread::Builder::new()
             .name("wallpaper-engine-capture".into())
             .spawn(move || {
+                let Ok(_com) = crate::com::MtaGuard::init() else {
+                    return;
+                };
                 let mut surfaces: Vec<Surface> = Vec::new();
                 let mut discovery = Instant::now() - Duration::from_secs(3);
                 while !worker.stop.load(Ordering::Relaxed) {
@@ -299,10 +416,14 @@ impl LiveWallpaper {
                         continue;
                     }
                     let start = Instant::now();
-                    if discovery.elapsed() >= Duration::from_secs(2) {
+                    if discovery.elapsed() >= Duration::from_millis(500) {
+                        worker
+                            .engine_running
+                            .store(engine_running(), Ordering::Relaxed);
                         let found = discover();
                         surfaces.retain(|s| {
-                            found.contains(&s.hwnd)
+                            !s.failed
+                                && found.contains(&s.hwnd)
                                 && capture_rect(s.hwnd).is_some_and(|r| {
                                     (r.right - r.left, r.bottom - r.top) == (s.width, s.height)
                                 })
@@ -317,7 +438,7 @@ impl LiveWallpaper {
                         }
                         discovery = Instant::now();
                     }
-                    let images: Vec<_> = surfaces.iter().filter_map(Surface::capture).collect();
+                    let images: Vec<_> = surfaces.iter_mut().filter_map(Surface::capture).collect();
                     if worker.enabled.load(Ordering::Relaxed)
                         && !images.is_empty()
                         && let Ok(mut latest) = worker.latest.lock()
@@ -334,11 +455,16 @@ impl LiveWallpaper {
                     );
                 }
             });
-        if let Err(error) = spawned {
-            tracing::warn!(%error, "live wallpaper worker unavailable");
-        }
+        let thread = match spawned {
+            Ok(handle) => Some(handle),
+            Err(error) => {
+                tracing::warn!(%error, "live wallpaper worker unavailable");
+                None
+            }
+        };
         Self {
             shared,
+            thread,
             interval_ms,
         }
     }
@@ -353,11 +479,25 @@ impl LiveWallpaper {
     pub fn take_latest(&self) -> Option<WallpaperFrame> {
         self.shared.latest.lock().ok()?.take()
     }
+
+    pub fn engine_running(&self) -> bool {
+        self.shared.engine_running.load(Ordering::Relaxed)
+    }
 }
 
 impl Drop for LiveWallpaper {
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::Relaxed);
-        // Do not join a thread potentially blocked in another process's PrintWindow.
+        // Drain GPU sessions before COM/process teardown. Bound the wait because legacy
+        // PrintWindow may be blocked in another process; never join an unfinished worker.
+        if let Some(handle) = self.thread.take() {
+            let until = Instant::now() + Duration::from_millis(500);
+            while !handle.is_finished() && Instant::now() < until {
+                thread::sleep(Duration::from_millis(5));
+            }
+            if handle.is_finished() {
+                let _ = handle.join();
+            }
+        }
     }
 }

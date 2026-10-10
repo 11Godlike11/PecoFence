@@ -216,10 +216,10 @@ pub struct Stats {
 }
 
 /// Broad neutral reflections and a restrained underside shade reveal the rounded cap.
-const RIM_SATURATION: f32 = 0.65;
+const RIM_SATURATION: f32 = 1.0;
 const RIM_TINT_OPACITY: f32 = 0.06;
 const RIM_LIGHT: f32 = 0.24;
-const SHOULDER_SHADE: f32 = 0.10;
+const SHOULDER_BOUNCE: f32 = 0.045;
 
 /// feColorMatrix `saturate` (Rec. 709 luma weights) in D2D's input-row layout.
 fn saturation_matrix(s: f32) -> [f32; 20] {
@@ -301,9 +301,9 @@ impl Effects {
         let light = effect(&b::CLSID_D2D1ColorMatrix)?;
         color_matrix(&light, light_matrix(RIM_LIGHT))?;
         let shade = effect(&b::CLSID_D2D1ColorMatrix)?;
-        let mut dark = [0.0; 20];
-        dark[15] = SHOULDER_SHADE;
-        color_matrix(&shade, dark)?;
+        // Back-facing glass receives weak white bounce light instead of a black overlay.
+        // The refraction supplies the thickness; it must not turn clear glass into smoke.
+        color_matrix(&shade, light_matrix(SHOULDER_BOUNCE))?;
         let composite = effect(&b::CLSID_D2D1Composite)?;
         let output = effect(&b::CLSID_D2D1ColorMatrix)?;
         unsafe {

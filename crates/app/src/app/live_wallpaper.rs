@@ -4,14 +4,14 @@ use pecofence_platform::live_wallpaper::LiveWallpaper;
 use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
-    rc::Weak,
 };
 
 pub(super) struct LiveBackdrop {
     pub worker: LiveWallpaper,
     static_set: Option<Rc<BackdropSets>>,
     last_frame: Option<Instant>,
-    applied: Option<(u64, Weak<BackdropSets>)>,
+    applied: Option<(u64, Rc<BackdropSets>)>,
+    waiting: bool,
     disabled: bool,
 }
 
@@ -22,6 +22,7 @@ impl Default for LiveBackdrop {
             static_set: None,
             last_frame: None,
             applied: None,
+            waiting: false,
             disabled: pecofence_core::brand::var("PECOFENCE_LIVE_WALLPAPER")
                 .is_ok_and(|s| s == "0"),
         }
@@ -51,14 +52,12 @@ impl App {
                 .applied
                 .as_ref()
                 .is_some_and(|(last, set)| {
-                    *last == fingerprint
-                        && set
-                            .upgrade()
-                            .is_some_and(|set| Rc::ptr_eq(&set, &self.ctx.backdrops.borrow()))
+                    *last == fingerprint && Rc::ptr_eq(set, &self.ctx.backdrops.borrow())
                 })
             {
                 // A paused WPE frame is a valid heartbeat: no uploads or redraws needed.
                 self.live_wallpaper.last_frame = Some(frame.captured_at);
+                self.live_wallpaper.waiting = false;
                 return;
             }
             // A theme/topology refresh may have installed a new static set since the last
@@ -123,7 +122,8 @@ impl App {
                     );
                 }
                 self.live_wallpaper.last_frame = Some(frame.captured_at);
-                self.live_wallpaper.applied = Some((fingerprint, Rc::downgrade(&set)));
+                self.live_wallpaper.waiting = false;
+                self.live_wallpaper.applied = Some((fingerprint, set.clone()));
                 self.apply_live_backdrops(set);
                 return;
             }
@@ -131,10 +131,11 @@ impl App {
         if self
             .live_wallpaper
             .last_frame
-            .is_some_and(|at| !enabled || at.elapsed() > Duration::from_millis(1500))
+            .is_some_and(|_| !enabled || !self.live_wallpaper.worker.engine_running())
         {
             self.live_wallpaper.last_frame = None;
             self.live_wallpaper.applied = None;
+            self.live_wallpaper.waiting = false;
             if let Some(base) = self.live_wallpaper.static_set.take() {
                 // Prefer a newly refreshed static set after a theme/topology change.
                 let base = self
@@ -144,7 +145,27 @@ impl App {
                     .unwrap_or(base);
                 self.apply_live_backdrops(base);
             }
-            tracing::info!("live wallpaper unavailable/disabled; static glass restored");
+            tracing::info!(
+                "Wallpaper Engine stopped or live capture disabled; static glass restored"
+            );
+        } else if enabled && self.live_wallpaper.worker.engine_running() {
+            // A transition or temporary capture failure must never silently change the
+            // material to the Windows wallpaper. Also protect against an OS wallpaper
+            // notification temporarily replacing the context with a newly decoded static set.
+            if let Some((_, set)) = &self.live_wallpaper.applied
+                && !Rc::ptr_eq(set, &self.ctx.backdrops.borrow())
+            {
+                self.apply_live_backdrops(set.clone());
+            }
+            if !self.live_wallpaper.waiting
+                && self
+                    .live_wallpaper
+                    .last_frame
+                    .is_some_and(|at| at.elapsed() > Duration::from_secs(2))
+            {
+                self.live_wallpaper.waiting = true;
+                tracing::warn!("Wallpaper Engine capture reconnecting; retaining last live frame");
+            }
         }
     }
 
