@@ -1,6 +1,36 @@
 use super::*;
 use crate::drag_guides::GuideLine;
 
+#[test]
+fn window_drag_cannot_hide_furniture_under_the_taskbar_or_offscreen() {
+    let work = rc(-1920, 40, 0, 1040);
+    for mut rect in [rc(-2200, -400, -1800, -100), rc(-100, 1000, 300, 1300)] {
+        constrain_to_work_area(&mut rect, &work);
+        assert_eq!((rect.right - rect.left, rect.bottom - rect.top), (400, 300));
+        assert!(rect.left >= work.left && rect.right <= work.right);
+        assert!(rect.top >= work.top && rect.bottom <= work.bottom);
+    }
+    let mut oversized = rc(-2100, 2000, 100, 3400);
+    constrain_to_work_area(&mut oversized, &work);
+    assert_eq!((oversized.left, oversized.top), (work.left, work.top));
+}
+
+#[test]
+fn group_drag_stays_above_taskbar_with_snapping_disabled() {
+    let start = rc(100, 100, 300, 300);
+    let member = GroupMember {
+        hwnd: HWND::default(),
+        fence: FenceId::new_v4(),
+        start: rc(320, 100, 520, 300),
+    };
+    let mut moved = rc(900, 1100, 1100, 1300);
+    let work = rc(0, 0, 1000, 1040);
+    let (placed, _) = place_group(&mut moved, &start, &[member], &[], |_| Some(work), None);
+    assert_eq!(placed[0].left - moved.left, 220);
+    assert_eq!(placed[0].top - moved.top, 0);
+    assert!(placed[0].right <= work.right && placed[0].bottom <= work.bottom);
+}
+
 /// A 600 px fence grabbed 500 px from its left edge on a 200 % monitor is dragged onto a 100 %
 /// one: WM_DPICHANGED halves it to 300 px, and the cursor must keep holding the same point of
 /// it (250 px in), not sit 200 px to the right of the window.

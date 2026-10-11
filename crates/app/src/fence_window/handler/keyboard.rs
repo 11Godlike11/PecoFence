@@ -16,15 +16,19 @@ pub(super) fn on_activate(
         let other = HWND(lparam as *mut core::ffi::c_void);
         !other.0.is_null() && {
             let cls = desktop::class_name(desktop::root_ancestor(other));
-            cls == "PecoFence.Rename" || cls == "#32768"
+            (cls == "PecoFence.Rename" || cls == "#32768")
+                && desktop::window_pid(other) == std::process::id()
         }
     };
     if !stays
         && let Ok(mut guard) = view.try_borrow_mut()
         && let Some(v) = guard.as_mut()
-        && v.set_active(!inactive)
     {
-        let _ = v.redraw_content();
+        let changed = v.set_active(!inactive);
+        let cleared = inactive && !v.desktop && !h.menu_open.get() && v.clear_item_selection();
+        if changed || cleared {
+            let _ = v.redraw_content();
+        }
     }
     None
 }

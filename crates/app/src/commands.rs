@@ -57,6 +57,9 @@ pub enum DesktopAction {
 #[derive(Debug)]
 #[allow(dead_code)]
 pub enum Command {
+    ClearItemSelection {
+        except: HWND,
+    },
     DesktopAction {
         fence: FenceId,
         action: DesktopAction,

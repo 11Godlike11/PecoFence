@@ -137,6 +137,21 @@ pub(super) fn work_area_under(rect: &RECT) -> Option<RECT> {
     monitors::query(mon).map(|info| info.work_area)
 }
 
+/// Keep movable furniture above the taskbar and inside the nearest monitor's work area.
+/// Oversized windows retain their size, with their title pinned to the visible top edge.
+pub(super) fn constrain_to_work_area(rect: &mut RECT, work: &RECT) {
+    let width = rect.right - rect.left;
+    let height = rect.bottom - rect.top;
+    rect.left = rect
+        .left
+        .clamp(work.left, (work.right - width).max(work.left));
+    rect.top = rect
+        .top
+        .clamp(work.top, (work.bottom - height).max(work.top));
+    rect.right = rect.left + width;
+    rect.bottom = rect.top + height;
+}
+
 /// Snaps `rect` (being dragged) to the other fence windows and the work area of the monitor
 /// under its centre; returns the alignment guides of the snapped position.
 pub(super) fn snap_rect(rect: &mut RECT, me: HWND, gap: i32, dist: i32) -> Vec<GuideLine> {

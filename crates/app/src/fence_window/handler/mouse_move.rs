@@ -345,7 +345,8 @@ pub(super) fn on_mousemove(
             }
             Some(r)
                 if matches!(r.effect, DropEffect::Move | DropEffect::Copy)
-                    && class != anchor::FENCE_CLASS =>
+                    && class != anchor::FENCE_CLASS
+                    && class != anchor::DESKTOP_CLASS =>
             {
                 queue.push(Command::DragOutFinished);
             }

@@ -88,6 +88,7 @@ use self::window_drag::*;
 pub struct FenceContext {
     pub stack: Rc<RenderStack>,
     pub class: WindowClass,
+    pub desktop_class: WindowClass,
     pub chrome: Rc<FenceChrome>,
     pub theme: RefCell<Theme>,
     pub backdrops: RefCell<Rc<BackdropSets>>,

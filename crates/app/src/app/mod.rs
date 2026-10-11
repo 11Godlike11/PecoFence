@@ -228,6 +228,7 @@ pub struct App {
     /// `PECOFENCE_INSTANCE` of this process (reported by `status.get`).
     instance: Option<String>,
     settings: Option<SettingsHost>,
+    pending_menu: Option<menus::PendingMenu>,
     /// Fence to select on the settings page once it reports `ready` (opened via 栅栏选项…).
     settings_focus_fence: Option<FenceId>,
     /// The 「反馈」 form on 「关于」: pending focus and the crash offer (see `feedback.rs`).
@@ -351,7 +352,7 @@ impl App {
             };
             Box::new(
                 move |hwnd: HWND, message: u32, wparam: usize, lparam: isize| -> Option<isize> {
-                    match message {
+                    let result = match message {
                         WM_APP_COMMAND => {
                             if let Ok(mut guard) = cell.try_borrow_mut() {
                                 if let Some(app) = guard.as_mut() {
@@ -732,7 +733,9 @@ impl App {
                         }
                         msg::WM_DESTROY => Some(0),
                         _ => None,
-                    }
+                    };
+                    menus::show_pending(&cell);
+                    result
                 },
             )
         };
@@ -789,6 +792,13 @@ impl App {
             frames,
             class: WindowClass::register(
                 anchor::FENCE_CLASS,
+                ClassOptions {
+                    double_clicks: true,
+                    background: None,
+                },
+            )?,
+            desktop_class: WindowClass::register(
+                anchor::DESKTOP_CLASS,
                 ClassOptions {
                     double_clicks: true,
                     background: None,
@@ -947,6 +957,7 @@ impl App {
             ipc_last_event: Instant::now(),
             instance: args.instance.clone(),
             settings: None,
+            pending_menu: None,
             settings_focus_fence: None,
             feedback: Default::default(),
             updates: Default::default(),
@@ -1009,8 +1020,15 @@ impl App {
         if let Some(a) = app.anchor.borrow_mut().as_mut() {
             let q = app.queue.clone();
             a.on_peek_interrupted = Some(Box::new(move || q.push(Command::EndPeek)));
+            let q = app.queue.clone();
             let control_hwnd = app.control.hwnd().0 as isize;
             a.on_foreground_changed = Some(Box::new(move || {
+                let foreground = desktop::foreground_window();
+                if desktop::window_pid(foreground) != std::process::id() {
+                    q.push(Command::ClearItemSelection {
+                        except: HWND::default(),
+                    });
+                }
                 window::post_message(
                     HWND(control_hwnd as *mut core::ffi::c_void),
                     WM_APP_WALLPAPER,
@@ -1245,6 +1263,11 @@ impl App {
             Command::DesktopAction { fence, action } => self.desktop_action(fence, action),
             Command::RefreshDesktop => self.refresh_desktop(),
             Command::ClearDesktopSelection { except } => self.clear_desktop_selection(except),
+            Command::ClearItemSelection { except } => {
+                for w in self.fences.values().filter(|w| w.hwnd() != except) {
+                    w.clear_item_selection();
+                }
+            }
             Command::DesktopDoubleClick => {
                 if self.state.config.settings.quick_hide.enabled {
                     self.toggle_all_fences();

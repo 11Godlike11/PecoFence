@@ -158,6 +158,18 @@ pub(super) struct MarqueeState {
 }
 
 impl FenceViewState {
+    /// A selection belongs to this interaction, except while a drag or rename owns it.
+    pub(super) fn clear_item_selection(&mut self) -> bool {
+        if self.ole_drag || self.selected.is_empty() {
+            return false;
+        }
+        self.selected.clear();
+        self.range_anchor = None;
+        self.focus_visible = false;
+        self.cancel_pending_rename();
+        true
+    }
+
     /// Moves the keyboard cursor to `next`: selecting it, extending the range from the anchor
     /// (Shift) or moving the focus alone (Ctrl); shows the focus ring and scrolls into view.
     pub(super) fn cursor_to(&mut self, next: usize, mode: CursorMode) {

@@ -116,7 +116,7 @@ fn foreground_allows_glass(
     fullscreen: bool,
 ) -> bool {
     ((class == "Progman" || class == "WorkerW") && pid == shell_pid)
-        || (pid == our_pid && !fullscreen)
+        || (pid == our_pid && (class == anchor::DESKTOP_CLASS || !fullscreen))
 }
 
 pub(super) struct LiveBackdrop {
@@ -387,6 +387,24 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_monitor_desktop_surface_keeps_glass_active() {
+        assert!(foreground_allows_glass(
+            anchor::DESKTOP_CLASS,
+            2,
+            1,
+            2,
+            true
+        ));
+        assert!(!foreground_allows_glass(
+            anchor::DESKTOP_CLASS,
+            3,
+            1,
+            2,
+            true
+        ));
+    }
 
     #[test]
     fn foreign_apps_and_fullscreen_pause_but_the_desktop_and_our_popups_resume() {

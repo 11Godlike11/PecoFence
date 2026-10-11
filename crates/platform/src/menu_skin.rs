@@ -98,6 +98,7 @@ struct Item {
 
 struct Skin {
     scale: f32,
+    max_height: u32,
     dark: bool,
     font: HFONT,
     bold: HFONT,
@@ -162,13 +163,14 @@ impl Skin {
             if !self.menus.iter().any(|(h, _)| *h == menu) {
                 let mut old = MenuInfo {
                     size: size_of::<MenuInfo>() as u32,
-                    mask: 0x12,
+                    mask: 0x13,
                     ..Default::default()
                 };
                 if GetMenuInfo(menu, &mut old).as_bool() {
                     let styled = MenuInfo {
                         background: self.background,
                         style: old.style | 0x8000_0000,
+                        max_height: self.max_height,
                         ..old
                     };
                     let _ = SetMenuInfo(menu, &styled);
@@ -179,9 +181,9 @@ impl Skin {
             let old_font = SelectObject(dc, HGDIOBJ(self.font.0));
             let mut added = Vec::new();
             let mut width = self.px(if menu == self.root && !self.actions.is_empty() {
-                240.0
+                216.0
             } else {
-                220.0
+                184.0
             }) as u32;
             for pos in 0..GetMenuItemCount(Some(menu)).max(0) as u32 {
                 let mut text = [0u16; 1024];
@@ -221,7 +223,7 @@ impl Skin {
                 );
                 let toolbar = menu == self.root && pos == 0 && !self.actions.is_empty();
                 if !toolbar {
-                    width = width.max((measure.right - measure.left + self.px(78.0)).max(0) as u32);
+                    width = width.max((measure.right - measure.left + self.px(62.0)).max(0) as u32);
                 }
                 info.dwTypeData = windows_core::PWSTR::null();
                 info.cch = 0;
@@ -253,7 +255,7 @@ impl Skin {
             let _ = SelectObject(dc, old_font);
             let _ = ReleaseDC(None, dc);
             for item in &mut added {
-                item.width = width;
+                item.width = width.min(self.px(280.0) as u32);
             }
             self.items.extend(added);
         }
@@ -401,8 +403,8 @@ impl Skin {
                         self.font.0
                     }),
                 );
-                r.left += self.px(36.0);
-                r.right -= self.px(18.0);
+                r.left += self.px(32.0);
+                r.right -= self.px(16.0);
                 let mut shortcut = r;
                 if !item.shortcut.is_empty() {
                     let wide = to_wide(&item.shortcut);
@@ -554,7 +556,8 @@ pub(crate) struct Session {
 impl Session {
     #[cfg(test)]
     pub(crate) fn begin(menu: HMENU, owner: HWND) -> Option<Self> {
-        Self::begin_with_actions(menu, owner, &[])
+        let point = crate::window::cursor_pos();
+        Self::begin_with_actions(menu, owner, &[], (point.x, point.y))
     }
 
     pub(crate) fn command(&self) -> Option<u32> {
@@ -565,6 +568,7 @@ impl Session {
         menu: HMENU,
         owner: HWND,
         actions: &[QuickAction],
+        point: (i32, i32),
     ) -> Option<Self> {
         let contrast = high_contrast();
         if contrast || ACTIVE.with(|a| a.borrow().is_some()) {
@@ -577,7 +581,7 @@ impl Session {
             let font = |name: &str, weight: i32| {
                 let face = to_wide(name);
                 CreateFontW(
-                    -(14.0 * scale).round() as i32,
+                    -(13.0 * scale).round() as i32,
                     0,
                     0,
                     0,
@@ -597,6 +601,15 @@ impl Session {
             let hover = color(0xefefef, 0x383838, dark);
             let mut skin = Skin {
                 scale,
+                max_height: crate::monitors::query(crate::monitors::monitor_from_point(
+                    point.0, point.1,
+                ))
+                .map(|m| {
+                    ((m.work_area.bottom - m.work_area.top) as f32 * 0.7)
+                        .min(300.0 * scale)
+                        .max(1.0) as u32
+                })
+                .unwrap_or((300.0 * scale) as u32),
                 dark,
                 font: font("Microsoft YaHei UI", FW_NORMAL),
                 bold: font("Microsoft YaHei UI", FW_SEMIBOLD),
@@ -767,11 +780,11 @@ pub(crate) fn forward(message: u32, wparam: usize, lparam: isize) -> Option<isiz
                     );
                     measure.width = item.width;
                     measure.height = skin.px(if item.toolbar {
-                        44.0
+                        38.0
                     } else if item.separator {
-                        9.0
+                        7.0
                     } else {
-                        32.0
+                        28.0
                     }) as u32;
                     Some(1)
                 }
@@ -882,7 +895,7 @@ mod tests {
             ),
             Some(1)
         );
-        assert_eq!(measure.height, 32);
+        assert_eq!(measure.height, 28);
         measure.data = 0x1234;
         assert_eq!(
             forward(

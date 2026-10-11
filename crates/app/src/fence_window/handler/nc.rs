@@ -811,6 +811,9 @@ pub(super) fn on_moving(
             (SNAP_DIST_DIP as f32 * scale) as i32,
         );
     }
+    if let Some(work) = work_area_under(rect) {
+        constrain_to_work_area(rect, &work);
+    }
     let radius = view
         .try_borrow()
         .ok()

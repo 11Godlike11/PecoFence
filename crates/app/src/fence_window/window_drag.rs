@@ -127,6 +127,9 @@ pub(super) fn flush_window_drag(
             (SNAP_DIST_DIP as f32 * scale) as i32,
         );
     }
+    if let Some(work) = work_area_under(&rect) {
+        constrain_to_work_area(&mut rect, &work);
+    }
     let snap_done = Instant::now();
     let (queue, hint_changed, requests, applied) = {
         let mut guard = view.borrow_mut();

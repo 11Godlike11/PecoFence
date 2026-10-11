@@ -26,7 +26,7 @@ pub(super) fn focus_session(view: &RefCell<Option<FenceViewState>>, hwnd: HWND) 
         .and_then(|g| g.as_ref().map(|v| v.behavior.floating.get()))
         .unwrap_or(false);
     if !peeking {
-        window::bring_to_front(hwnd);
+        window::claim_foreground(hwnd);
     }
     if desktop::foreground_window() == hwnd {
         // MA_NOACTIVATE suppresses the default mouse-to-keyboard focus handoff. Explicit
@@ -175,6 +175,15 @@ impl FenceWindow {
                 }
                 if press_ends_selection(&h.behavior, hwnd, message, wparam) {
                     h.queue.push(Command::ClearFenceSelection);
+                }
+                if matches!(
+                    message,
+                    msg::WM_LBUTTONDOWN
+                        | msg::WM_RBUTTONDOWN
+                        | msg::WM_NCLBUTTONDOWN
+                        | WM_NCRBUTTONDOWN
+                ) {
+                    h.queue.push(Command::ClearItemSelection { except: hwnd });
                 }
                 match message {
                     msg::WM_MOUSEACTIVATE => Some(msg::MA_NOACTIVATE),

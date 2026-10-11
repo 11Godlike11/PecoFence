@@ -2,6 +2,48 @@
 
 use super::*;
 
+/// Prepare under an App borrow, track with it released, then apply the chosen command.
+/// This lets wallpaper capture, frame callbacks and focus events run inside USER32's loop.
+pub(super) struct PendingMenu {
+    menu: PopupMenu,
+    owner: HWND,
+    x: i32,
+    y: i32,
+    bottom_align: bool,
+    invoke: Box<dyn FnOnce(&mut App, u32)>,
+}
+
+thread_local! { static TRACKING_MENU: Cell<bool> = const { Cell::new(false) }; }
+
+pub(super) fn show_pending(cell: &AppCell) {
+    if TRACKING_MENU.with(Cell::get) {
+        return;
+    }
+    loop {
+        let pending = cell
+            .try_borrow_mut()
+            .ok()
+            .and_then(|mut guard| guard.as_mut().and_then(|app| app.pending_menu.take()));
+        let Some(pending) = pending else {
+            return;
+        };
+        TRACKING_MENU.with(|active| active.set(true));
+        let cmd = if pending.bottom_align {
+            pending.menu.show(pending.owner, pending.x, pending.y)
+        } else {
+            pending
+                .menu
+                .show_context(pending.owner, pending.x, pending.y)
+        };
+        TRACKING_MENU.with(|active| active.set(false));
+        if let Ok(mut guard) = cell.try_borrow_mut()
+            && let Some(app) = guard.as_mut()
+        {
+            (pending.invoke)(app, cmd);
+        }
+    }
+}
+
 // Tray / menu command ids.
 const CMD_TOGGLE_FENCES: u32 = 1;
 const CMD_NEW_FENCE: u32 = 2;
@@ -217,26 +259,32 @@ impl App {
                 false,
             )
             .icon(glyph::EXIT);
-        let cmd = menu.show(self.control.hwnd(), x, y);
-        match cmd {
-            CMD_TOGGLE_FENCES => self.toggle_all_fences(),
-            CMD_PEEK => self.queue.push(Command::TogglePeek),
-            CMD_NEW_FENCE => self.queue.push(Command::NewFence { x, y: y - 300 }),
-            c if (CMD_SHOW_FOLDER..CMD_SHOW_FOLDER + 4).contains(&c) => {
-                self.show_folder_command(c - CMD_SHOW_FOLDER, x, y - 300, None)
-            }
-            CMD_APPLY_RULES => self.queue.push(Command::ApplyRulesNow),
-            CMD_REPAIR_ICONS => self.set_desktop_icons_hidden(false),
-            CMD_HIDE_ICONS_AGAIN => {
-                self.set_desktop_icons_hidden(
-                    !pecofence_platform::shell_icons::desktop_icons_hidden(),
-                );
-            }
-            CMD_FEEDBACK => self.open_feedback(false),
-            CMD_SETTINGS => self.queue.push(Command::OpenSettings),
-            CMD_EXIT => self.queue.push(Command::Quit),
-            _ => {}
-        }
+        self.pending_menu = Some(PendingMenu {
+            menu,
+            owner: self.control.hwnd(),
+            x,
+            y,
+            bottom_align: true,
+            invoke: Box::new(move |app, cmd| match cmd {
+                CMD_TOGGLE_FENCES => app.toggle_all_fences(),
+                CMD_PEEK => app.queue.push(Command::TogglePeek),
+                CMD_NEW_FENCE => app.queue.push(Command::NewFence { x, y: y - 300 }),
+                c if (CMD_SHOW_FOLDER..CMD_SHOW_FOLDER + 4).contains(&c) => {
+                    app.show_folder_command(c - CMD_SHOW_FOLDER, x, y - 300, None)
+                }
+                CMD_APPLY_RULES => app.queue.push(Command::ApplyRulesNow),
+                CMD_REPAIR_ICONS => app.set_desktop_icons_hidden(false),
+                CMD_HIDE_ICONS_AGAIN => {
+                    app.set_desktop_icons_hidden(
+                        !pecofence_platform::shell_icons::desktop_icons_hidden(),
+                    );
+                }
+                CMD_FEEDBACK => app.open_feedback(false),
+                CMD_SETTINGS => app.queue.push(Command::OpenSettings),
+                CMD_EXIT => app.queue.push(Command::Quit),
+                _ => {}
+            }),
+        });
     }
 
     pub(super) fn show_item_menu(
@@ -260,92 +308,104 @@ impl App {
             .window_for(fence)
             .map(|w| w.hwnd())
             .unwrap_or(self.control.hwnd());
-        let cmd = menu.show_context(owner, x, y);
-        if let Some(sm) = shell_menu.as_ref()
-            && sm.contains(cmd)
-        {
-            let verb = sm.verb(cmd).unwrap_or_default();
-            tracing::info!(cmd, %verb, count = paths.len(), "shell verb invoked");
-            if verb.eq_ignore_ascii_case("copy") || verb.eq_ignore_ascii_case("cut") {
-                self.clipboard_verb(fence, &items, verb.eq_ignore_ascii_case("cut"));
-                return;
-            }
-            if verb.eq_ignore_ascii_case("rename")
-                && items.len() == 1
-                && self
-                    .state
-                    .item(items[0])
-                    .is_some_and(|it| !it.is_namespace())
-            {
-                self.begin_item_rename(fence, items[0]);
-                return;
-            }
-            // Shift at the moment of choosing (Shift+click on 删除 = permanent, as in Explorer).
-            let shift = window::key_down(msg::VK_SHIFT);
-            if let Err(e) = sm.invoke(cmd, owner, POINT { x, y }, shift) {
-                tracing::warn!(error = %e, %verb, "shell verb failed");
-            }
-            // Deletions / moves are picked up by the desktop watcher. What a namespace item's
-            // verb changes (Empty Recycle Bin, hide This PC) arrives as a shell notification;
-            // a resync is requested here too in case that channel is unavailable.
-            if items
-                .iter()
-                .any(|id| self.state.item(*id).is_some_and(|it| it.is_namespace()))
-            {
-                window::post_message(self.control.hwnd(), WM_APP_FS_CHANGED, 0, 0);
-            }
-            return;
-        }
-        drop(shell_menu);
-        match cmd {
-            CMD_ITEM_OPEN => {
-                for id in &items {
-                    self.launch(*id);
-                }
-            }
-            CMD_ITEM_LOCATION => {
-                if let Some(item) = items.first().and_then(|id| self.state.item(*id))
-                    && !item.is_namespace()
-                    && let Some(p) = item.key.as_path()
+        self.pending_menu = Some(PendingMenu {
+            menu,
+            owner,
+            x,
+            y,
+            bottom_align: false,
+            invoke: Box::new(move |app, cmd| {
+                if let Some(sm) = shell_menu.as_ref()
+                    && sm.contains(cmd)
                 {
-                    use std::os::windows::process::CommandExt;
-                    // `/select,"<path>"`: quoted as a whole (what `arg` does for a name with
-                    // a space), the argument makes Explorer open Documents instead.
-                    let _ = std::process::Command::new("explorer.exe")
-                        .raw_arg(format!("/select,\"{p}\""))
-                        .spawn();
+                    let verb = sm.verb(cmd).unwrap_or_default();
+                    tracing::info!(cmd, %verb, count = paths.len(), "shell verb invoked");
+                    if verb.eq_ignore_ascii_case("copy") || verb.eq_ignore_ascii_case("cut") {
+                        app.clipboard_verb(fence, &items, verb.eq_ignore_ascii_case("cut"));
+                        return;
+                    }
+                    if verb.eq_ignore_ascii_case("rename")
+                        && items.len() == 1
+                        && app
+                            .state
+                            .item(items[0])
+                            .is_some_and(|it| !it.is_namespace())
+                    {
+                        app.begin_item_rename(fence, items[0]);
+                        return;
+                    }
+                    // Shift at the moment of choosing (Shift+click on 删除 = permanent, as in Explorer).
+                    let shift = window::key_down(msg::VK_SHIFT);
+                    if let Err(e) = sm.invoke(cmd, owner, POINT { x, y }, shift) {
+                        tracing::warn!(error = %e, %verb, "shell verb failed");
+                    }
+                    // Deletions / moves are picked up by the desktop watcher. What a namespace item's
+                    // verb changes (Empty Recycle Bin, hide This PC) arrives as a shell notification;
+                    // a resync is requested here too in case that channel is unavailable.
+                    if items
+                        .iter()
+                        .any(|id| app.state.item(*id).is_some_and(|it| it.is_namespace()))
+                    {
+                        window::post_message(app.control.hwnd(), WM_APP_FS_CHANGED, 0, 0);
+                    }
+                    return;
                 }
-            }
-            CMD_ITEM_PROPERTIES => self.show_properties(fence, &items),
-            CMD_ITEM_TO_INBOX => {
-                self.release_to_desktop(&items, None);
-            }
-            CMD_ITEM_PORTAL => {
-                if let Some(folder) = self.single_folder_of(&items) {
-                    self.create_portal(folder, x, y, Some(fence));
+                drop(shell_menu);
+                match cmd {
+                    CMD_ITEM_OPEN => {
+                        for id in &items {
+                            app.launch(*id);
+                        }
+                    }
+                    CMD_ITEM_LOCATION => {
+                        if let Some(item) = items.first().and_then(|id| app.state.item(*id))
+                            && !item.is_namespace()
+                            && let Some(p) = item.key.as_path()
+                        {
+                            use std::os::windows::process::CommandExt;
+                            // `/select,"<path>"`: quoted as a whole (what `arg` does for a name with
+                            // a space), the argument makes Explorer open Documents instead.
+                            let _ = std::process::Command::new("explorer.exe")
+                                .raw_arg(format!("/select,\"{p}\""))
+                                .spawn();
+                        }
+                    }
+                    CMD_ITEM_PROPERTIES => app.show_properties(fence, &items),
+                    CMD_ITEM_TO_INBOX => {
+                        app.release_to_desktop(&items, None);
+                    }
+                    CMD_ITEM_PORTAL => {
+                        if let Some(folder) = app.single_folder_of(&items) {
+                            app.create_portal(folder, x, y, Some(fence));
+                        }
+                    }
+                    CMD_ITEM_RENAME => {
+                        if let [item] = items[..] {
+                            app.begin_item_rename(fence, item);
+                        }
+                    }
+                    CMD_ITEM_DELETE => {
+                        app.delete_items(fence, &items, window::key_down(msg::VK_SHIFT))
+                    }
+                    CMD_ITEM_CUT | CMD_ITEM_COPY => {
+                        app.clipboard_verb(fence, &items, cmd == CMD_ITEM_CUT)
+                    }
+                    CMD_ITEM_OPEN_WITH => {
+                        if let [path] = paths.as_slice() {
+                            let _ = shell::shell_execute(path, Some("openas"), Some(owner));
+                        }
+                    }
+                    CMD_ITEM_MORE => app.show_item_menu(fence, items, x, y, true),
+                    c if c >= CMD_ITEM_MOVE_BASE && c < CMD_ITEM_MOVE_BASE + 1000 => {
+                        let idx = (c - CMD_ITEM_MOVE_BASE) as usize;
+                        if let Some(target) = app.state.fences().get(idx).map(|f| f.id) {
+                            app.move_items(&items, target);
+                        }
+                    }
+                    _ => {}
                 }
-            }
-            CMD_ITEM_RENAME => {
-                if let [item] = items[..] {
-                    self.begin_item_rename(fence, item);
-                }
-            }
-            CMD_ITEM_DELETE => self.delete_items(fence, &items, window::key_down(msg::VK_SHIFT)),
-            CMD_ITEM_CUT | CMD_ITEM_COPY => self.clipboard_verb(fence, &items, cmd == CMD_ITEM_CUT),
-            CMD_ITEM_OPEN_WITH => {
-                if let [path] = paths.as_slice() {
-                    let _ = shell::shell_execute(path, Some("openas"), Some(owner));
-                }
-            }
-            CMD_ITEM_MORE => self.show_item_menu(fence, items, x, y, true),
-            c if c >= CMD_ITEM_MOVE_BASE && c < CMD_ITEM_MOVE_BASE + 1000 => {
-                let idx = (c - CMD_ITEM_MOVE_BASE) as usize;
-                if let Some(target) = self.state.fences().get(idx).map(|f| f.id) {
-                    self.move_items(&items, target);
-                }
-            }
-            _ => {}
-        }
+            }),
+        });
     }
 
     /// The folder behind a single selected folder item (在桌面显示此文件夹).
@@ -838,135 +898,146 @@ impl App {
             .get(&host)
             .map(|w| w.hwnd())
             .unwrap_or(self.control.hwnd());
-        let cmd = menu.show_context(owner, x, y);
-        match cmd {
-            CMD_FENCE_ROLL => self.toggle_roll(host),
-            CMD_FENCE_RENAME => self.begin_rename(fence),
-            CMD_TAB_NEW if !self.fence_room_or_notice() => {}
-            CMD_TAB_NEW => {
-                let rect = self.fences.get(&host).map(|w| w.rect()).unwrap_or(RECT {
-                    left: x,
-                    top: y,
-                    right: x + 240,
-                    bottom: y + 200,
-                });
-                if let Some(id) = self
-                    .state
-                    .new_fence(pecofence_core::i18n::text("新标签页"), rect)
-                {
-                    self.state.attach_tab(id, host);
-                    self.resync_windows();
-                    self.apply_fence_view(host);
-                    self.schedule_save();
-                }
-            }
-            CMD_TAB_DETACH => self.detach_tab(fence, x, y, false),
-            CMD_TAB_MOVE_LEFT => self.reorder_tab(host, fence, tab_idx.saturating_sub(1)),
-            CMD_TAB_MOVE_RIGHT => self.reorder_tab(host, fence, tab_idx + 1),
-            CMD_FENCE_PASTE => self.paste_into(fence),
-            c if c >= CMD_TAB_ATTACH_BASE
-                && c < CMD_TAB_ATTACH_BASE + self.state.host_fences().len() as u32 =>
-            {
-                let idx = (c - CMD_TAB_ATTACH_BASE) as usize;
-                if let Some(target) = self.state.host_fences().get(idx).map(|o| o.id)
-                    && self.state.attach_tab(fence, target)
-                {
-                    // The merged fence's own window (if it had one) goes away in resync.
-                    self.resync_windows();
-                    self.apply_fence_view(target);
-                    if let Some(w) = self.fences.get(&target) {
-                        self.queue.push(Command::RaiseFence(w.hwnd()));
+        self.pending_menu = Some(PendingMenu {
+            menu,
+            owner,
+            x,
+            y,
+            bottom_align: false,
+            invoke: Box::new(move |app, cmd| {
+                match cmd {
+                    CMD_FENCE_ROLL => app.toggle_roll(host),
+                    CMD_FENCE_RENAME => app.begin_rename(fence),
+                    CMD_TAB_NEW if !app.fence_room_or_notice() => {}
+                    CMD_TAB_NEW => {
+                        let rect = app.fences.get(&host).map(|w| w.rect()).unwrap_or(RECT {
+                            left: x,
+                            top: y,
+                            right: x + 240,
+                            bottom: y + 200,
+                        });
+                        if let Some(id) = app
+                            .state
+                            .new_fence(pecofence_core::i18n::text("新标签页"), rect)
+                        {
+                            app.state.attach_tab(id, host);
+                            app.resync_windows();
+                            app.apply_fence_view(host);
+                            app.schedule_save();
+                        }
                     }
-                    self.schedule_save();
+                    CMD_TAB_DETACH => app.detach_tab(fence, x, y, false),
+                    CMD_TAB_MOVE_LEFT => app.reorder_tab(host, fence, tab_idx.saturating_sub(1)),
+                    CMD_TAB_MOVE_RIGHT => app.reorder_tab(host, fence, tab_idx + 1),
+                    CMD_FENCE_PASTE => app.paste_into(fence),
+                    c if c >= CMD_TAB_ATTACH_BASE
+                        && c < CMD_TAB_ATTACH_BASE + app.state.host_fences().len() as u32 =>
+                    {
+                        let idx = (c - CMD_TAB_ATTACH_BASE) as usize;
+                        if let Some(target) = app.state.host_fences().get(idx).map(|o| o.id)
+                            && app.state.attach_tab(fence, target)
+                        {
+                            // The merged fence's own window (if it had one) goes away in resync.
+                            app.resync_windows();
+                            app.apply_fence_view(target);
+                            if let Some(w) = app.fences.get(&target) {
+                                app.queue.push(Command::RaiseFence(w.hwnd()));
+                            }
+                            app.schedule_save();
+                        }
+                    }
+                    CMD_FENCE_OPEN_FOLDER => {
+                        if let Some(dir) = portal_dir.as_deref() {
+                            let _ = shell::shell_execute(dir, None, None);
+                        }
+                    }
+                    CMD_PORTAL_UP => app.portal_up(fence),
+                    c if (CMD_FENCE_SHOW_FOLDER..CMD_FENCE_SHOW_FOLDER + 4).contains(&c) => {
+                        app.show_folder_command(c - CMD_FENCE_SHOW_FOLDER, x, y, Some(host))
+                    }
+                    CMD_PORTAL_HOME => {
+                        if app.state.portal_home(fence) {
+                            app.after_portal_navigation(fence);
+                        }
+                    }
+                    CMD_FENCE_NEW_FOLDER => app.create_desktop_item(fence, true),
+                    CMD_FENCE_NEW_TEXT => app.create_desktop_item(fence, false),
+                    CMD_FENCE_ICON_32 | CMD_FENCE_ICON_48 | CMD_FENCE_ICON_64
+                    | CMD_FENCE_ICON_96 => {
+                        let size = match cmd {
+                            CMD_FENCE_ICON_32 => 32,
+                            CMD_FENCE_ICON_64 => 64,
+                            CMD_FENCE_ICON_96 => 96,
+                            _ => 48,
+                        };
+                        app.apply_icon_size(fence, size);
+                    }
+                    CMD_FENCE_VIEW_ICONS | CMD_FENCE_VIEW_LIST | CMD_FENCE_VIEW_DETAILS => {
+                        let layout = match cmd {
+                            CMD_FENCE_VIEW_LIST => ViewLayout::List,
+                            CMD_FENCE_VIEW_DETAILS => ViewLayout::Details,
+                            _ => ViewLayout::Icons,
+                        };
+                        app.state.set_layout(fence, layout);
+                        if let Some(w) = app.window_for(fence)
+                            && w.active_fence() == fence
+                        {
+                            w.set_layout(layout);
+                        }
+                        app.apply_cell_snap(fence);
+                        app.apply_auto_height(fence);
+                        app.schedule_save();
+                    }
+                    CMD_FENCE_SORT_MANUAL
+                    | CMD_FENCE_SORT_NAME
+                    | CMD_FENCE_SORT_TYPE
+                    | CMD_FENCE_SORT_DATE
+                    | CMD_FENCE_SORT_SIZE
+                    | CMD_FENCE_SORT_OPENED => {
+                        let sort = match cmd {
+                            CMD_FENCE_SORT_NAME => SortMode::Name,
+                            CMD_FENCE_SORT_TYPE => SortMode::Type,
+                            CMD_FENCE_SORT_DATE => SortMode::Date,
+                            CMD_FENCE_SORT_SIZE => SortMode::Size,
+                            CMD_FENCE_SORT_OPENED => SortMode::OpenCount,
+                            _ => SortMode::Manual,
+                        };
+                        app.state.set_sort(fence, sort);
+                        app.refresh_fence(fence);
+                        app.schedule_save();
+                    }
+                    CMD_FENCE_SORT_REVERSE => {
+                        app.state.set_reverse(fence, !f.view.reverse);
+                        app.refresh_fence(fence);
+                        app.schedule_save();
+                    }
+                    CMD_FENCE_SORT_GROUP => {
+                        // Also switches to date order; `refresh_fence` pushes the flag, the re-sorted
+                        // items, the header indicator and the auto height.
+                        app.state.set_group_by_date(fence, !f.view.group_by_date);
+                        app.refresh_fence(fence);
+                        app.schedule_save();
+                    }
+                    CMD_FENCE_LOCK => app.set_fence_locked(host, !h.locked),
+                    CMD_FENCE_OPTIONS => app.open_fence_options(fence),
+                    CMD_FENCE_NEW => {
+                        let rect = app.place_new_fence(3, 200.0, x, y, Some(host));
+                        app.create_fence_at(rect, None);
+                    }
+                    CMD_FENCE_DELETE => app.delete_fence_from_menu(fence),
+                    CMD_FENCE_HIDE_EMPTY => {
+                        app.set_fence_hide_when_empty(fence, !f.hide_when_empty)
+                    }
+                    _ => return,
                 }
-            }
-            CMD_FENCE_OPEN_FOLDER => {
-                if let Some(dir) = portal_dir.as_deref() {
-                    let _ = shell::shell_execute(dir, None, None);
-                }
-            }
-            CMD_PORTAL_UP => self.portal_up(fence),
-            c if (CMD_FENCE_SHOW_FOLDER..CMD_FENCE_SHOW_FOLDER + 4).contains(&c) => {
-                self.show_folder_command(c - CMD_FENCE_SHOW_FOLDER, x, y, Some(host))
-            }
-            CMD_PORTAL_HOME => {
-                if self.state.portal_home(fence) {
-                    self.after_portal_navigation(fence);
-                }
-            }
-            CMD_FENCE_NEW_FOLDER => self.create_desktop_item(fence, true),
-            CMD_FENCE_NEW_TEXT => self.create_desktop_item(fence, false),
-            CMD_FENCE_ICON_32 | CMD_FENCE_ICON_48 | CMD_FENCE_ICON_64 | CMD_FENCE_ICON_96 => {
-                let size = match cmd {
-                    CMD_FENCE_ICON_32 => 32,
-                    CMD_FENCE_ICON_64 => 64,
-                    CMD_FENCE_ICON_96 => 96,
-                    _ => 48,
-                };
-                self.apply_icon_size(fence, size);
-            }
-            CMD_FENCE_VIEW_ICONS | CMD_FENCE_VIEW_LIST | CMD_FENCE_VIEW_DETAILS => {
-                let layout = match cmd {
-                    CMD_FENCE_VIEW_LIST => ViewLayout::List,
-                    CMD_FENCE_VIEW_DETAILS => ViewLayout::Details,
-                    _ => ViewLayout::Icons,
-                };
-                self.state.set_layout(fence, layout);
-                if let Some(w) = self.window_for(fence)
-                    && w.active_fence() == fence
-                {
-                    w.set_layout(layout);
-                }
-                self.apply_cell_snap(fence);
-                self.apply_auto_height(fence);
-                self.schedule_save();
-            }
-            CMD_FENCE_SORT_MANUAL
-            | CMD_FENCE_SORT_NAME
-            | CMD_FENCE_SORT_TYPE
-            | CMD_FENCE_SORT_DATE
-            | CMD_FENCE_SORT_SIZE
-            | CMD_FENCE_SORT_OPENED => {
-                let sort = match cmd {
-                    CMD_FENCE_SORT_NAME => SortMode::Name,
-                    CMD_FENCE_SORT_TYPE => SortMode::Type,
-                    CMD_FENCE_SORT_DATE => SortMode::Date,
-                    CMD_FENCE_SORT_SIZE => SortMode::Size,
-                    CMD_FENCE_SORT_OPENED => SortMode::OpenCount,
-                    _ => SortMode::Manual,
-                };
-                self.state.set_sort(fence, sort);
-                self.refresh_fence(fence);
-                self.schedule_save();
-            }
-            CMD_FENCE_SORT_REVERSE => {
-                self.state.set_reverse(fence, !f.view.reverse);
-                self.refresh_fence(fence);
-                self.schedule_save();
-            }
-            CMD_FENCE_SORT_GROUP => {
-                // Also switches to date order; `refresh_fence` pushes the flag, the re-sorted
-                // items, the header indicator and the auto height.
-                self.state.set_group_by_date(fence, !f.view.group_by_date);
-                self.refresh_fence(fence);
-                self.schedule_save();
-            }
-            CMD_FENCE_LOCK => self.set_fence_locked(host, !h.locked),
-            CMD_FENCE_OPTIONS => self.open_fence_options(fence),
-            CMD_FENCE_NEW => {
-                let rect = self.place_new_fence(3, 200.0, x, y, Some(host));
-                self.create_fence_at(rect, None);
-            }
-            CMD_FENCE_DELETE => self.delete_fence_from_menu(fence),
-            CMD_FENCE_HIDE_EMPTY => self.set_fence_hide_when_empty(fence, !f.hide_when_empty),
-            _ => return,
-        }
-        // An open settings page shows these fences too; keep it current.
-        self.push_settings_state();
+                // An open settings page shows these fences too; keep it current.
+                app.push_settings_state();
+            }),
+        });
     }
 
     pub(super) fn show_desktop_menu(&mut self, fence: FenceId, x: i32, y: i32) {
-        let settings = &self.state.config.settings;
+        let settings = self.state.config.settings.clone();
         let menu = PopupMenu::new();
         let view = PopupMenu::new();
         for (cmd, size, label) in [
@@ -1034,55 +1105,63 @@ impl App {
         let owner = self
             .window_for(fence)
             .map_or(self.control.hwnd(), |w| w.hwnd());
-        match menu.show_context(owner, x, y) {
-            CMD_FENCE_ICON_32 => self.apply_icon_size(fence, 32),
-            CMD_FENCE_ICON_48 => self.apply_icon_size(fence, 48),
-            CMD_FENCE_ICON_64 => self.apply_icon_size(fence, 64),
-            CMD_FENCE_ICON_96 => self.apply_icon_size(fence, 96),
-            CMD_DESKTOP_AUTO => {
-                self.state.config.settings.desktop_view.auto_arrange =
-                    !settings.desktop_view.auto_arrange;
-                self.state.mark_dirty();
-                self.refresh_desktop();
-                self.schedule_save();
-            }
-            CMD_DESKTOP_GRID => {
-                self.state.config.settings.desktop_view.align_grid =
-                    !settings.desktop_view.align_grid;
-                self.state.mark_dirty();
-                if self.state.config.settings.desktop_view.align_grid {
-                    self.align_desktop_grid();
+        self.pending_menu = Some(PendingMenu {
+            menu,
+            owner,
+            x,
+            y,
+            bottom_align: false,
+            invoke: Box::new(move |app, cmd| match cmd {
+                CMD_FENCE_ICON_32 => app.apply_icon_size(fence, 32),
+                CMD_FENCE_ICON_48 => app.apply_icon_size(fence, 48),
+                CMD_FENCE_ICON_64 => app.apply_icon_size(fence, 64),
+                CMD_FENCE_ICON_96 => app.apply_icon_size(fence, 96),
+                CMD_DESKTOP_AUTO => {
+                    app.state.config.settings.desktop_view.auto_arrange =
+                        !settings.desktop_view.auto_arrange;
+                    app.state.mark_dirty();
+                    app.refresh_desktop();
+                    app.schedule_save();
                 }
-                self.schedule_save();
-            }
-            cmd @ (CMD_FENCE_SORT_NAME | CMD_FENCE_SORT_TYPE | CMD_FENCE_SORT_DATE
-            | CMD_FENCE_SORT_SIZE) => {
-                self.state.config.settings.desktop_view.sort = match cmd {
-                    CMD_FENCE_SORT_TYPE => SortMode::Type,
-                    CMD_FENCE_SORT_DATE => SortMode::Date,
-                    CMD_FENCE_SORT_SIZE => SortMode::Size,
-                    _ => SortMode::Name,
-                };
-                self.state.mark_dirty();
-                self.arrange_desktop();
-            }
-            CMD_DESKTOP_REFRESH => self.manual_refresh(fence),
-            CMD_SETTINGS => self.queue.push(Command::OpenSettings),
-            CMD_FENCE_PASTE => self.paste_into(fence),
-            CMD_FENCE_NEW_FOLDER => self.create_desktop_item(fence, true),
-            CMD_FENCE_NEW_TEXT => self.create_desktop_item(fence, false),
-            CMD_NEW_FENCE_HERE => {
-                let rect = self.place_new_fence(3, 200.0, x, y, None);
-                self.create_fence_at(rect, None);
-            }
-            CMD_DESKTOP_DISPLAY => {
-                let _ = shell::shell_execute(Path::new("ms-settings:display"), None, None);
-            }
-            CMD_DESKTOP_PERSONALIZE => {
-                let _ = shell::shell_execute(Path::new("ms-settings:personalization"), None, None);
-            }
-            _ => {}
-        }
+                CMD_DESKTOP_GRID => {
+                    app.state.config.settings.desktop_view.align_grid =
+                        !settings.desktop_view.align_grid;
+                    app.state.mark_dirty();
+                    if app.state.config.settings.desktop_view.align_grid {
+                        app.align_desktop_grid();
+                    }
+                    app.schedule_save();
+                }
+                cmd @ (CMD_FENCE_SORT_NAME | CMD_FENCE_SORT_TYPE | CMD_FENCE_SORT_DATE
+                | CMD_FENCE_SORT_SIZE) => {
+                    app.state.config.settings.desktop_view.sort = match cmd {
+                        CMD_FENCE_SORT_TYPE => SortMode::Type,
+                        CMD_FENCE_SORT_DATE => SortMode::Date,
+                        CMD_FENCE_SORT_SIZE => SortMode::Size,
+                        _ => SortMode::Name,
+                    };
+                    app.state.mark_dirty();
+                    app.arrange_desktop();
+                }
+                CMD_DESKTOP_REFRESH => app.manual_refresh(fence),
+                CMD_SETTINGS => app.queue.push(Command::OpenSettings),
+                CMD_FENCE_PASTE => app.paste_into(fence),
+                CMD_FENCE_NEW_FOLDER => app.create_desktop_item(fence, true),
+                CMD_FENCE_NEW_TEXT => app.create_desktop_item(fence, false),
+                CMD_NEW_FENCE_HERE => {
+                    let rect = app.place_new_fence(3, 200.0, x, y, None);
+                    app.create_fence_at(rect, None);
+                }
+                CMD_DESKTOP_DISPLAY => {
+                    let _ = shell::shell_execute(Path::new("ms-settings:display"), None, None);
+                }
+                CMD_DESKTOP_PERSONALIZE => {
+                    let _ =
+                        shell::shell_execute(Path::new("ms-settings:personalization"), None, None);
+                }
+                _ => {}
+            }),
+        });
     }
 
     /// Right-click on the Details header: Explorer's column chooser (名称 always on).
@@ -1122,36 +1201,42 @@ impl App {
             .window_for(fence)
             .map(|w| w.hwnd())
             .unwrap_or(self.control.hwnd());
-        let cmd = menu.show_context(owner, x, y);
-        match cmd {
-            CMD_COL_DATE | CMD_COL_TYPE | CMD_COL_SIZE => {
-                let i = match cmd {
-                    CMD_COL_DATE => 0,
-                    CMD_COL_TYPE => 1,
-                    _ => 2,
-                };
-                vis[i] = !vis[i];
-                self.state.set_columns_visible(fence, vis);
-                if let Some(w) = self.window_for(fence)
-                    && w.active_fence() == fence
-                {
-                    w.set_columns_visible(vis);
+        self.pending_menu = Some(PendingMenu {
+            menu,
+            owner,
+            x,
+            y,
+            bottom_align: false,
+            invoke: Box::new(move |app, cmd| match cmd {
+                CMD_COL_DATE | CMD_COL_TYPE | CMD_COL_SIZE => {
+                    let i = match cmd {
+                        CMD_COL_DATE => 0,
+                        CMD_COL_TYPE => 1,
+                        _ => 2,
+                    };
+                    vis[i] = !vis[i];
+                    app.state.set_columns_visible(fence, vis);
+                    if let Some(w) = app.window_for(fence)
+                        && w.active_fence() == fence
+                    {
+                        w.set_columns_visible(vis);
+                    }
+                    app.apply_auto_height(fence);
+                    app.schedule_save();
                 }
-                self.apply_auto_height(fence);
-                self.schedule_save();
-            }
-            CMD_COL_RESET_WIDTHS => {
-                let widths = crate::layout::DetailColumns::DEFAULT_WIDTHS;
-                self.state.set_column_widths(fence, widths);
-                if let Some(w) = self.window_for(fence)
-                    && w.active_fence() == fence
-                {
-                    w.set_column_widths(widths);
+                CMD_COL_RESET_WIDTHS => {
+                    let widths = crate::layout::DetailColumns::DEFAULT_WIDTHS;
+                    app.state.set_column_widths(fence, widths);
+                    if let Some(w) = app.window_for(fence)
+                        && w.active_fence() == fence
+                    {
+                        w.set_column_widths(widths);
+                    }
+                    app.schedule_save();
                 }
-                self.schedule_save();
-            }
-            _ => {}
-        }
+                _ => {}
+            }),
+        });
     }
 
     /// Marquee on the empty desktop: confirm with a one-item menu, then create the fence there.
@@ -1181,8 +1266,17 @@ impl App {
             false,
             false,
         );
-        if menu.show_context(owner, pt.x, pt.y) == CMD_NEW_FENCE_HERE {
-            self.create_fence_at(rect, None);
-        }
+        self.pending_menu = Some(PendingMenu {
+            menu,
+            owner,
+            x: pt.x,
+            y: pt.y,
+            bottom_align: false,
+            invoke: Box::new(move |app, cmd| {
+                if cmd == CMD_NEW_FENCE_HERE {
+                    app.create_fence_at(rect, None);
+                }
+            }),
+        });
     }
 }

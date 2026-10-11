@@ -1071,7 +1071,7 @@ impl FenceViewState {
             })
             .filter(|(_, r)| r.y + r.h > fixed && r.y < height_dip)
             .collect();
-        if cells.len() > DRAG_IMAGE_MAX_ITEMS {
+        if !self.desktop && cells.len() > DRAG_IMAGE_MAX_ITEMS {
             return None;
         }
         let first = cells.first()?.1;
@@ -1089,7 +1089,7 @@ impl FenceViewState {
             b.min(height_dip),
         );
         let (bw, bh) = (r - l, b - t);
-        if bw <= 0.0 || bh <= 0.0 || !drag_image_fits(bw, bh) {
+        if bw <= 0.0 || bh <= 0.0 || (!self.desktop && !drag_image_fits(bw, bh)) {
             return None;
         }
         let (w_px, h_px) = ((bw * scale).ceil() as u32, (bh * scale).ceil() as u32);
@@ -1257,6 +1257,13 @@ impl FenceViewState {
             return None;
         }
         let bgra = rt.read_pixels().ok()?;
+        tracing::debug!(
+            desktop = self.desktop,
+            items = cells.len(),
+            width = w_px,
+            height = h_px,
+            "in-place drag image ready"
+        );
         // The shell places the image at cursor - offset: with the offset taken at the press
         // point the copy lands pixel-exactly over the source, displaced by whatever the pointer
         // has moved since (a ListView's LVN_BEGINDRAG anchor).

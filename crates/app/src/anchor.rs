@@ -13,6 +13,7 @@ use std::rc::Rc;
 use std::time::Instant;
 
 pub const FENCE_CLASS: &str = "PecoFence.Fence";
+pub const DESKTOP_CLASS: &str = "PecoFence.Desktop";
 pub const SENTINEL_CLASS: &str = "PecoFence.Sentinel";
 
 const TIMER_ANCHOR_CHECK: usize = 10;

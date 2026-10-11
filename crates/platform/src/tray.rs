@@ -513,6 +513,7 @@ impl PopupMenu {
             self.hmenu,
             owner,
             &self.quick_actions.borrow(),
+            (x, y),
         );
         let mut flags = (TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_LEFTALIGN) as u32;
         if bottom_align {

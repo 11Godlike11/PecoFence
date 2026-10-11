@@ -118,24 +118,30 @@ impl FenceWindow {
         {
             style::EX_NOREDIRECTIONBITMAP
         } else {
-            style::EX_NOACTIVATE | style::EX_TOOLWINDOW | style::EX_NOREDIRECTIONBITMAP
+            (if desktop { 0 } else { style::EX_NOACTIVATE })
+                | style::EX_TOOLWINDOW
+                | style::EX_NOREDIRECTIONBITMAP
         };
-        let window = WindowBuilder::new(&ctx.class)
-            .title(title)
-            .style(
-                style::POPUP
-                    | (if desktop { 0 } else { style::THICKFRAME })
-                    | style::CLIPCHILDREN
-                    | style::CLIPSIBLINGS,
-            )
-            .ex_style(extended_style)
-            .bounds(
-                bounds.left,
-                bounds.top,
-                bounds.right - bounds.left,
-                height.max(1),
-            )
-            .create(handler)?;
+        let window = WindowBuilder::new(if desktop {
+            &ctx.desktop_class
+        } else {
+            &ctx.class
+        })
+        .title(title)
+        .style(
+            style::POPUP
+                | (if desktop { 0 } else { style::THICKFRAME })
+                | style::CLIPCHILDREN
+                | style::CLIPSIBLINGS,
+        )
+        .ex_style(extended_style)
+        .bounds(
+            bounds.left,
+            bounds.top,
+            bounds.right - bounds.left,
+            height.max(1),
+        )
+        .create(handler)?;
         let hwnd = window.hwnd();
         if desktop {
             let _ = window::set_hit_regions(
@@ -433,6 +439,15 @@ impl FenceWindow {
             .as_ref()
             .map(|v| v.selected_ids())
             .unwrap_or_default()
+    }
+
+    pub fn clear_item_selection(&self) {
+        if let Ok(mut guard) = self.view.try_borrow_mut()
+            && let Some(v) = guard.as_mut()
+            && v.clear_item_selection()
+        {
+            let _ = v.redraw_content();
+        }
     }
 
     pub fn desktop_scale(&self) -> f32 {

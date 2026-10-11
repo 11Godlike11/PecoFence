@@ -119,6 +119,11 @@ pub(super) fn place_group(
         guides = alignment_guides(&snapped, others, work.as_ref(), dist);
         (sx, sy) = (snapped.left - bbox.left, snapped.top - bbox.top);
     }
+    if let Some(work) = work_for(&bbox) {
+        let mut constrained = shifted(&bbox, sx, sy);
+        constrain_to_work_area(&mut constrained, &work);
+        (sx, sy) = (constrained.left - bbox.left, constrained.top - bbox.top);
+    }
     *rect = shifted(rect, sx, sy);
     let placed = members
         .iter()
