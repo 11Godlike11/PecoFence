@@ -281,10 +281,19 @@ fn glyph_bitmap(glyph: char, px: i32, color: u32) -> Option<HBITMAP> {
 }
 
 /// A popup menu built from items; destroyed on drop.
+#[derive(Clone)]
+pub struct QuickAction {
+    pub id: u32,
+    pub label: String,
+    pub glyph: char,
+    pub disabled: bool,
+}
+
 pub struct PopupMenu {
     hmenu: HMENU,
     /// Item bitmaps from `icon`, its submenus' included: a menu does not own them.
     bitmaps: RefCell<Vec<HBITMAP>>,
+    quick_actions: RefCell<Vec<QuickAction>>,
 }
 
 impl Default for PopupMenu {
@@ -299,11 +308,36 @@ impl PopupMenu {
         Self {
             hmenu: unsafe { CreatePopupMenu() },
             bitmaps: RefCell::default(),
+            quick_actions: RefCell::default(),
         }
     }
 
     pub fn handle(&self) -> HMENU {
         self.hmenu
+    }
+
+    /// Compact file commands in one row. On high-contrast desktops, ordinary native items
+    /// retain the system's own rendering and keyboard/accessibility behavior.
+    pub fn quick_actions(&self, actions: &[QuickAction]) -> &Self {
+        if actions.is_empty() {
+            return self;
+        }
+        if crate::menu_skin::high_contrast() {
+            for action in actions {
+                self.item(action.id, &action.label, false, action.disabled)
+                    .icon(action.glyph);
+            }
+        } else {
+            assert_eq!(self.len(), 0, "quick actions must be the first row");
+            let label = actions
+                .iter()
+                .map(|a| a.label.as_str())
+                .collect::<Vec<_>>()
+                .join(" / ");
+            self.item(0x7FFF_FFFE, &label, false, false);
+            *self.quick_actions.borrow_mut() = actions.to_vec();
+        }
+        self
     }
 
     /// Number of items currently in the menu (= the insertion index for appending).
@@ -475,7 +509,11 @@ impl PopupMenu {
     }
 
     fn show_aligned(&self, owner: HWND, x: i32, y: i32, bottom_align: bool) -> u32 {
-        let _presentation = crate::menu_skin::Session::begin(self.hmenu, owner);
+        let presentation = crate::menu_skin::Session::begin_with_actions(
+            self.hmenu,
+            owner,
+            &self.quick_actions.borrow(),
+        );
         let mut flags = (TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_LEFTALIGN) as u32;
         if bottom_align {
             flags |= TPM_BOTTOMALIGN as u32;
@@ -485,7 +523,11 @@ impl PopupMenu {
             let _ = SetForegroundWindow(owner);
             let cmd = TrackPopupMenuEx(self.hmenu, flags, x, y, owner, None);
             let _ = PostMessageW(Some(owner), WM_NULL as u32, WPARAM(0), LPARAM(0));
-            cmd.0 as u32
+            let chosen = presentation
+                .as_ref()
+                .and_then(|s| s.command())
+                .unwrap_or(cmd.0 as u32);
+            if chosen == 0x7FFF_FFFE { 0 } else { chosen }
         }
     }
 }

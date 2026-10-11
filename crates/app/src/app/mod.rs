@@ -1351,8 +1351,13 @@ impl App {
             } => self.detach_tab(tab, x, y, from_drag),
             Command::CancelDetach { change } => self.cancel_tab_detach(*change),
             Command::ReorderTab { host, tab, to } => self.reorder_tab(host, tab, to),
-            Command::MoveItemsToDesktop { items, position } => {
-                self.release_to_desktop(&items, position);
+            Command::MoveItemsToDesktop {
+                items,
+                position,
+                grab_offset,
+                mode,
+            } => {
+                self.drop_onto_desktop(&items, position, grab_offset, mode);
             }
             Command::ExternalDrop { paths, to, mode } if self.state.portal_path(to).is_some() => {
                 self.transfer_files_into_portal(paths, to, mode);
@@ -1450,7 +1455,13 @@ impl App {
             Command::ShellDrop { to, landed } => self.shell_drop_landed(to, landed),
             Command::FenceMenu { fence, x, y } => self.show_fence_menu(fence, x, y),
             Command::HeaderMenu { fence, x, y } => self.show_header_menu(fence, x, y),
-            Command::ItemMenu { fence, items, x, y } => self.show_item_menu(fence, items, x, y),
+            Command::ItemMenu {
+                fence,
+                items,
+                x,
+                y,
+                extended,
+            } => self.show_item_menu(fence, items, x, y, extended),
             Command::ClipboardVerb { fence, items, cut } => self.clipboard_verb(fence, &items, cut),
             Command::Paste { fence } => self.paste_into(fence),
             Command::NewFolder { fence } => self.create_desktop_item(fence, true),

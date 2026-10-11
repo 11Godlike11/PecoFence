@@ -898,7 +898,11 @@ impl FenceViewState {
             } else {
                 Some(self.empty_text())
             },
-            drop_highlight: self.drop_wash.value_at(now),
+            drop_highlight: if self.desktop {
+                0.0
+            } else {
+                self.drop_wash.value_at(now)
+            },
             marquee: if self.desktop {
                 None
             } else {

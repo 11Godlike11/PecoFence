@@ -30,6 +30,7 @@ pub(super) enum FileOpThen {
         to: FenceId,
         dest: PathBuf,
         before: HashSet<PathBuf>,
+        position: Option<(i32, i32)>,
     },
     /// A rename the filesystem refused, retried through the shell for its permission prompt.
     /// The folder watcher pairs the rename, so the item keeps its fence.
@@ -180,7 +181,12 @@ impl App {
                     ));
                 }
             },
-            FileOpThen::Duplicate { to, dest, before } => {
+            FileOpThen::Duplicate {
+                to,
+                dest,
+                before,
+                position,
+            } => {
                 match &result {
                     Ok(true) => tracing::info!("pasted duplicates"),
                     Ok(false) => tracing::info!("paste cancelled by user"),
@@ -206,7 +212,7 @@ impl App {
                             path,
                             since: Instant::now(),
                             rename: false,
-                            desktop_position: None,
+                            desktop_position: position,
                         });
                     }
                     self.sync_desktop_if_available("paste duplicates");

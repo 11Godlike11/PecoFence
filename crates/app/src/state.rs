@@ -493,6 +493,7 @@ impl AppState {
             };
             (!a.is_namespace())
                 .cmp(&(!b.is_namespace()))
+                .then_with(|| (!a.is_folder).cmp(&(!b.is_folder)))
                 .then(order)
                 .then_with(|| natural_cmp(&a.display_name, &b.display_name))
         });
@@ -2368,6 +2369,32 @@ mod tests {
                 .contains_key(&item)
         );
         assert_eq!(state.loose_items().len(), 1);
+    }
+
+    #[test]
+    fn desktop_sort_keeps_namespaces_and_folders_before_natural_file_order() {
+        let mut state = test_state();
+        let fence = state.fences()[0].id;
+        let file10 = add_item(&mut state, fence, "Document10");
+        let file2 = add_item(&mut state, fence, "Document2");
+        let folder = add_item(&mut state, fence, "ZFolder");
+        state.config.items.get_mut(&folder).unwrap().is_folder = true;
+        let namespace = add_item(&mut state, fence, "ZRecycle");
+        state.config.items.get_mut(&namespace).unwrap().key =
+            ItemKey::from_path("::{645FF040-5081-101B-9F08-00AA002F954E}");
+        state.release_items(&[file10, file2, folder, namespace], None);
+        let ordered = |state: &AppState| {
+            state
+                .loose_items()
+                .into_iter()
+                .map(|it| it.id)
+                .collect::<Vec<_>>()
+        };
+        state.config.settings.desktop_view.sort = SortMode::Name;
+        assert_eq!(ordered(&state), [namespace, folder, file2, file10]);
+        state.config.items.get_mut(&file10).unwrap().mtime = 2;
+        state.config.settings.desktop_view.sort = SortMode::Date;
+        assert_eq!(ordered(&state), [namespace, folder, file10, file2]);
     }
 
     #[test]

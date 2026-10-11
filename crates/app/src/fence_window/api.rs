@@ -122,7 +122,12 @@ impl FenceWindow {
         };
         let window = WindowBuilder::new(&ctx.class)
             .title(title)
-            .style(style::POPUP | style::THICKFRAME | style::CLIPCHILDREN | style::CLIPSIBLINGS)
+            .style(
+                style::POPUP
+                    | (if desktop { 0 } else { style::THICKFRAME })
+                    | style::CLIPCHILDREN
+                    | style::CLIPSIBLINGS,
+            )
             .ex_style(extended_style)
             .bounds(
                 bounds.left,
@@ -143,7 +148,12 @@ impl FenceWindow {
                 }],
             );
         }
-        apply_window_shape(hwnd, ctx.theme.borrow().liquid_glass);
+        if desktop {
+            let _ = dwm::set_nonclient_rendering(hwnd, false);
+            let _ = dwm::set_corner_preference(hwnd, dwm::CornerPreference::DoNotRound);
+        } else {
+            apply_window_shape(hwnd, ctx.theme.borrow().liquid_glass);
+        }
         let _ = dwm::set_border_color_none(hwnd);
         // Not DWMWA_EXCLUDED_FROM_PEEK: DWM hides such windows for the whole virtual-desktop
         // switch animation while their shadows slide, leaving empty panes. Plain windows slide

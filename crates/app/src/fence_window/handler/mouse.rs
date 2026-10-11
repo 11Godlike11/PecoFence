@@ -708,6 +708,7 @@ pub(super) fn on_rbuttonup(
                 items: v.selected_ids(),
                 x: pt.x,
                 y: pt.y,
+                extended: window::key_down(msg::VK_SHIFT),
             };
             drop(guard);
             focus_session(view, hwnd);

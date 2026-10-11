@@ -68,6 +68,10 @@ pub(super) fn on_keydown(
     let mut release = false;
     let shift = window::key_down(msg::VK_SHIFT);
     let ctrl = window::key_down(msg::VK_CONTROL);
+    if vk == 0x79 && shift {
+        drop(guard);
+        return contextmenu(h, _hwnd, -1, true);
+    }
     const VK_BACK: u32 = 0x08;
     const VK_TAB: u32 = 0x09;
     const VK_PRIOR: u32 = 0x21;
@@ -324,6 +328,10 @@ pub(super) fn on_contextmenu(
     _wparam: usize,
     lparam: isize,
 ) -> Option<isize> {
+    contextmenu(h, hwnd, lparam, window::key_down(msg::VK_SHIFT))
+}
+
+fn contextmenu(h: &HandlerCtx, hwnd: HWND, lparam: isize, extended: bool) -> Option<isize> {
     let HandlerCtx { view, queue, .. } = h;
     if lparam != -1 && lparam as u32 != u32::MAX {
         return Some(0);
@@ -366,6 +374,7 @@ pub(super) fn on_contextmenu(
         items: ids,
         x,
         y,
+        extended,
     });
     Some(0)
 }

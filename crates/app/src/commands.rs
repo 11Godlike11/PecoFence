@@ -153,6 +153,8 @@ pub enum Command {
     MoveItemsToDesktop {
         items: Vec<ItemId>,
         position: Option<(i32, i32)>,
+        grab_offset: Option<(f32, f32)>,
+        mode: TransferMode,
     },
     /// Files dropped from Explorer onto a fence with the effect the drop reported (Explorer's
     /// modifier table: Ctrl copy, Alt / Ctrl+Shift shortcut, otherwise move).
@@ -219,6 +221,7 @@ pub enum Command {
         items: Vec<ItemId>,
         x: i32,
         y: i32,
+        extended: bool,
     },
     RenameFence {
         fence: FenceId,

@@ -21,6 +21,10 @@ const CMD_ITEM_TO_INBOX: u32 = 103;
 const CMD_ITEM_PORTAL: u32 = 104;
 const CMD_ITEM_RENAME: u32 = 105;
 const CMD_ITEM_DELETE: u32 = 106;
+const CMD_ITEM_CUT: u32 = 107;
+const CMD_ITEM_COPY: u32 = 108;
+const CMD_ITEM_OPEN_WITH: u32 = 109;
+const CMD_ITEM_MORE: u32 = 110;
 const CMD_FENCE_OPEN_FOLDER: u32 = 332;
 const CMD_ITEM_MOVE_BASE: u32 = 200;
 const CMD_NEW_FENCE_HERE: u32 = 250;
@@ -112,6 +116,11 @@ mod glyph {
     pub const REPAIR: char = '\u{E90F}';
     pub const MESSAGE: char = '\u{E8BD}';
     pub const EXIT: char = '\u{F3B1}';
+    pub const CUT: char = '\u{E8C6}';
+    pub const COPY: char = '\u{E8C8}';
+    pub const OPEN: char = '\u{E8E5}';
+    pub const INFO: char = '\u{E946}';
+    pub const MORE: char = '\u{E712}';
 }
 
 impl App {
@@ -230,7 +239,14 @@ impl App {
         }
     }
 
-    pub(super) fn show_item_menu(&mut self, fence: FenceId, items: Vec<ItemId>, x: i32, y: i32) {
+    pub(super) fn show_item_menu(
+        &mut self,
+        fence: FenceId,
+        items: Vec<ItemId>,
+        x: i32,
+        y: i32,
+        extended: bool,
+    ) {
         let items = if self.is_desktop_view(fence) {
             self.selected_desktop_items()
         } else {
@@ -239,7 +255,7 @@ impl App {
         if items.is_empty() {
             return;
         }
-        let (menu, shell_menu, paths) = self.build_item_menu(fence, &items);
+        let (menu, shell_menu, paths) = self.build_item_menu(fence, &items, extended);
         let owner = self
             .window_for(fence)
             .map(|w| w.hwnd())
@@ -315,6 +331,13 @@ impl App {
                 }
             }
             CMD_ITEM_DELETE => self.delete_items(fence, &items, window::key_down(msg::VK_SHIFT)),
+            CMD_ITEM_CUT | CMD_ITEM_COPY => self.clipboard_verb(fence, &items, cmd == CMD_ITEM_CUT),
+            CMD_ITEM_OPEN_WITH => {
+                if let [path] = paths.as_slice() {
+                    let _ = shell::shell_execute(path, Some("openas"), Some(owner));
+                }
+            }
+            CMD_ITEM_MORE => self.show_item_menu(fence, items, x, y, true),
             c if c >= CMD_ITEM_MOVE_BASE && c < CMD_ITEM_MOVE_BASE + 1000 => {
                 let idx = (c - CMD_ITEM_MOVE_BASE) as usize;
                 if let Some(target) = self.state.fences().get(idx).map(|f| f.id) {
@@ -339,7 +362,7 @@ impl App {
 
     /// Test dump (`--test-script item-menu`): the menu a right-click on `item` would show.
     pub(super) fn item_menu_labels(&self, fence: FenceId, item: ItemId) -> Vec<String> {
-        self.build_item_menu(fence, &[item]).0.labels()
+        self.build_item_menu(fence, &[item], false).0.labels()
     }
 
     /// Keep Shell commands in the system's order. Virtual grouping belongs to a single
@@ -348,6 +371,7 @@ impl App {
         &self,
         fence: FenceId,
         items: &[ItemId],
+        extended: bool,
     ) -> (PopupMenu, Option<ShellContextMenu>, Vec<PathBuf>) {
         let menu = PopupMenu::new();
         // Namespace items (Recycle Bin, ...) have no file: rename and "open location" are off.
@@ -356,9 +380,15 @@ impl App {
             [only] if self.state.item(only).is_some_and(|it| it.is_namespace())
         );
         let paths = self.shell_paths_of(items);
-        let mut shell_menu =
-            ShellContextMenu::for_paths(&paths.iter().map(|p| p.as_path()).collect::<Vec<_>>())
-                .ok();
+        let compact = !extended
+            && !items
+                .iter()
+                .any(|id| self.state.item(*id).is_some_and(|it| it.is_namespace()));
+        let mut shell_menu = if compact {
+            None
+        } else {
+            ShellContextMenu::for_paths(&paths.iter().map(|p| p.as_path()).collect::<Vec<_>>()).ok()
+        };
         let native_available = shell_menu.as_mut().is_some_and(|sm| {
             match sm.populate(
                 menu.handle(),
@@ -374,7 +404,36 @@ impl App {
                 }
             }
         });
-        if !native_available {
+        if compact {
+            use pecofence_platform::tray::QuickAction;
+            let actions = [
+                (CMD_ITEM_CUT, "剪切\tCtrl+X", glyph::CUT, false),
+                (CMD_ITEM_COPY, "复制\tCtrl+C", glyph::COPY, false),
+                (
+                    CMD_ITEM_RENAME,
+                    "重命名\tF2",
+                    glyph::RENAME,
+                    items.len() != 1,
+                ),
+                (CMD_ITEM_DELETE, "删除\tDelete", glyph::DELETE, false),
+            ]
+            .map(|(id, label, glyph, disabled)| QuickAction {
+                id,
+                label: label.into(),
+                glyph,
+                disabled,
+            });
+            menu.quick_actions(&actions)
+                .item(CMD_ITEM_OPEN, "打开\tEnter", false, false)
+                .icon(glyph::OPEN)
+                .default_item(CMD_ITEM_OPEN);
+            if matches!(items, [id] if self.state.item(*id).is_some_and(|it| !it.is_folder)) {
+                menu.item(CMD_ITEM_OPEN_WITH, "打开方式…", false, false)
+                    .icon(glyph::OPEN);
+            }
+            menu.item(CMD_ITEM_PROPERTIES, "属性\tAlt+Enter", false, false)
+                .icon(glyph::INFO);
+        } else if !native_available {
             shell_menu = None;
             menu.item(
                 CMD_ITEM_OPEN,
@@ -469,6 +528,11 @@ impl App {
         menu.separator()
             .submenu("PecoFence", app_menu)
             .icon(glyph::ADD_TO);
+        if compact {
+            menu.separator()
+                .item(CMD_ITEM_MORE, "显示更多选项\tShift+F10", false, false)
+                .icon(glyph::MORE);
+        }
         menu.tidy_separators();
         (menu, shell_menu, paths)
     }
@@ -907,7 +971,6 @@ impl App {
         let view = PopupMenu::new();
         for (cmd, size, label) in [
             (CMD_FENCE_ICON_96, 96, "大图标"),
-            (CMD_FENCE_ICON_64, 64, "较大图标"),
             (CMD_FENCE_ICON_48, 48, "中等图标"),
             (CMD_FENCE_ICON_32, 32, "小图标"),
         ] {

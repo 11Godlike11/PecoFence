@@ -437,6 +437,8 @@ impl App {
                         self.queue.push(Command::MoveItemsToDesktop {
                             position: None,
                             items: vec![item],
+                            grab_offset: None,
+                            mode: crate::commands::TransferMode::Move,
                         });
                     }
                 }

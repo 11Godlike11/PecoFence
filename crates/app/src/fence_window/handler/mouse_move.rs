@@ -249,6 +249,13 @@ pub(super) fn on_mousemove(
         let paths = pecofence_platform::shell::paths_for_shell(selected_paths);
         let from = v.active;
         let from_portal = v.is_portal;
+        let grab_offset = v.desktop.then(|| {
+            let cell = v.desktop_cells[item];
+            (
+                sx as f32 / v.scale() - cell.x,
+                sy as f32 / v.scale() - cell.y,
+            )
+        });
         v.ole_drag = true;
         v.ole_drag_press = (sx, sy);
         let _ = v.redraw();
@@ -264,6 +271,7 @@ pub(super) fn on_mousemove(
                         from,
                         items: ids.clone(),
                         paths: paths.clone(),
+                        grab_offset,
                     })
                 });
                 // Nested message loop until the button is released.
@@ -331,6 +339,8 @@ pub(super) fn on_mousemove(
                 queue.push(Command::MoveItemsToDesktop {
                     items: ids,
                     position: Some((pt.x, pt.y)),
+                    grab_offset,
+                    mode: TransferMode::Move,
                 });
             }
             Some(r)

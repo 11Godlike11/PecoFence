@@ -548,6 +548,7 @@ impl App {
                     rename_on_collision: true,
                     owner,
                     then: FileOpThen::Duplicate {
+                        position: None,
                         to: if self.is_desktop_view(fence) {
                             uuid::Uuid::nil()
                         } else {

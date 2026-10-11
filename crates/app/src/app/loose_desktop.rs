@@ -59,6 +59,74 @@ impl App {
         }
     }
     pub(super) fn release_to_desktop(&mut self, items: &[ItemId], point: Option<(i32, i32)>) {
+        self.release_to_desktop_at(items, point, None);
+    }
+
+    pub(super) fn drop_onto_desktop(
+        &mut self,
+        items: &[ItemId],
+        point: Option<(i32, i32)>,
+        grab_offset: Option<(f32, f32)>,
+        mode: TransferMode,
+    ) {
+        if mode == TransferMode::Move {
+            self.release_to_desktop_at(items, point, grab_offset);
+            return;
+        }
+        let Some(dest) = shell::user_desktop() else {
+            return;
+        };
+        let paths: Vec<_> = self
+            .shell_paths_of(items)
+            .into_iter()
+            .filter(|p| !shell::is_namespace_path(p))
+            .collect();
+        if paths.is_empty() {
+            return;
+        }
+        if mode == TransferMode::Copy {
+            let before = std::fs::read_dir(&dest)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| e.path())
+                .collect();
+            self.start_fileop(FileOp {
+                paths,
+                dest: dest.clone(),
+                copy: true,
+                rename_on_collision: true,
+                owner: self.desktop_windows.values().next().map(|w| w.hwnd()),
+                then: FileOpThen::Duplicate {
+                    to: uuid::Uuid::nil(),
+                    dest,
+                    before,
+                    position: point,
+                },
+            });
+        } else {
+            for path in self.create_shortcuts_in(&paths, &dest) {
+                self.pending_routes.push(PendingRoute {
+                    fence: uuid::Uuid::nil(),
+                    path,
+                    since: Instant::now(),
+                    rename: false,
+                    desktop_position: point,
+                });
+            }
+            self.sync_desktop_if_available("desktop shortcut drag");
+            self.route_pending_creation();
+            self.refresh_all();
+            self.schedule_save();
+        }
+    }
+
+    pub(super) fn release_to_desktop_at(
+        &mut self,
+        items: &[ItemId],
+        point: Option<(i32, i32)>,
+        grab_offset: Option<(f32, f32)>,
+    ) {
         let (portal, desktop): (Vec<_>, Vec<_>) = items
             .iter()
             .copied()
@@ -133,11 +201,12 @@ impl App {
                     })
                 })
                 .collect();
+            let grab = grab_offset.unwrap_or((m.cell_w / 2.0, m.icon_top + m.icon / 2.0));
             let cells = place_desktop_group(
                 &offsets,
                 (
-                    (x - work.left) as f32 / scale - m.cell_w / 2.0,
-                    (y - work.top) as f32 / scale - m.icon_top - m.icon / 2.0,
+                    (x - work.left) as f32 / scale - grab.0,
+                    (y - work.top) as f32 / scale - grab.1,
                 ),
                 (wd, hd),
                 (m.cell_w, m.cell_h),

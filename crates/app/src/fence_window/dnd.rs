@@ -13,6 +13,8 @@ pub(super) struct InternalDrag {
     pub(super) from: FenceId,
     pub(super) items: Vec<ItemId>,
     pub(super) paths: Vec<PathBuf>,
+    /// Pointer offset in the desktop cell, in DIPs, retained through the OLE loop.
+    pub(super) grab_offset: Option<(f32, f32)>,
 }
 
 thread_local! {
@@ -429,7 +431,11 @@ impl FenceDropHandler {
                 } else if internal.is_some() && spot.folder.is_none() {
                     // Fence membership has no copy / link; only a folder target honours the
                     // modifiers (our own source offers every effect, so no clipping needed).
-                    DropEffect::Move
+                    if v.desktop && internal.as_ref().is_some_and(|d| d.grab_offset.is_some()) {
+                        effect_for(key_state, allowed, true)
+                    } else {
+                        DropEffect::Move
+                    }
                 } else {
                     let folder = spot
                         .folder
@@ -443,7 +449,9 @@ impl FenceDropHandler {
             }
         };
         // What the badge names: the tab pill, the folder, or the fence being shown.
-        let insert = if let Some(t) = spot.tab.and_then(|i| v.tabs.get(i)) {
+        let insert = if v.desktop && spot.folder.is_none() {
+            "桌面".to_string()
+        } else if let Some(t) = spot.tab.and_then(|i| v.tabs.get(i)) {
             t.title.clone()
         } else if let Some(it) = spot.folder.and_then(|i| v.items.get(i)) {
             it.name.clone()
@@ -710,14 +718,33 @@ impl DropHandler for FenceDropHandler {
                         });
                         break 'resolve DropEffect::Move;
                     }
-                    if to == d.from {
-                        if self.view.borrow().as_ref().is_some_and(|v| v.desktop) {
-                            self.queue.push(Command::MoveItemsToDesktop {
-                                items: d.items,
-                                position: Some((pt.x, pt.y)),
-                            });
-                            break 'resolve DropEffect::Move;
+                    if self.view.borrow().as_ref().is_some_and(|v| v.desktop) {
+                        let mut effect = if d.grab_offset.is_some() {
+                            effect_for(key_state, allowed, true)
+                        } else {
+                            DropEffect::Move
+                        };
+                        if right {
+                            drop_image(effect);
+                            effect = right_drag_menu(
+                                hwnd,
+                                pt,
+                                effect,
+                                &[DropEffect::Move, DropEffect::Copy, DropEffect::Link],
+                            );
                         }
+                        let Some(mode) = transfer_mode(effect) else {
+                            break 'resolve DropEffect::None;
+                        };
+                        self.queue.push(Command::MoveItemsToDesktop {
+                            items: d.items,
+                            position: Some((pt.x, pt.y)),
+                            grab_offset: d.grab_offset,
+                            mode,
+                        });
+                        break 'resolve effect;
+                    }
+                    if to == d.from {
                         break 'resolve DropEffect::None;
                     }
                     self.queue.push(Command::MoveItems { items: d.items, to });
@@ -910,7 +937,11 @@ impl FenceViewState {
                 s.tab,
                 s.folder,
                 s.insert,
-                s.tab.is_none() && s.folder.is_none() && s.insert.is_none() && !s.self_drop,
+                !self.desktop
+                    && s.tab.is_none()
+                    && s.folder.is_none()
+                    && s.insert.is_none()
+                    && !s.self_drop,
             ),
             None => (None, None, None, false),
         };

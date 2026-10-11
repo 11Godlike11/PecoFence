@@ -3,6 +3,7 @@
 //! is left alone. No Explorer hooks or private uxtheme ordinals are involved.
 
 use crate::bindings::*;
+use crate::tray::QuickAction;
 use crate::wide::to_wide;
 use std::cell::RefCell;
 use windows_core::{BOOL, PCWSTR};
@@ -74,6 +75,15 @@ windows_core::link!("gdi32.dll" "system" fn CreatePen(style: i32, width: i32, co
 windows_core::link!("gdi32.dll" "system" fn RoundRect(dc: HDC, left: i32, top: i32, right: i32, bottom: i32, width: i32, height: i32) -> BOOL);
 windows_core::link!("msimg32.dll" "system" fn AlphaBlend(dest: HDC, x: i32, y: i32, width: i32, height: i32, source: HDC, sx: i32, sy: i32, sw: i32, sh: i32, blend: u32) -> BOOL);
 windows_core::link!("uxtheme.dll" "system" fn SetWindowTheme(hwnd: HWND, app: PCWSTR, ids: PCWSTR) -> windows_core::HRESULT);
+type FilterHook = *mut core::ffi::c_void;
+type FilterProc = Option<unsafe extern "system" fn(i32, usize, isize) -> isize>;
+windows_core::link!("user32.dll" "system" fn SetWindowsHookExW(kind: i32, proc: FilterProc, module: *mut core::ffi::c_void, thread: u32) -> FilterHook);
+windows_core::link!("user32.dll" "system" fn UnhookWindowsHookEx(hook: FilterHook) -> BOOL);
+windows_core::link!("user32.dll" "system" fn CallNextHookEx(hook: FilterHook, code: i32, wp: usize, lp: isize) -> isize);
+windows_core::link!("user32.dll" "system" fn EndMenu() -> BOOL);
+windows_core::link!("user32.dll" "system" fn GetMenuItemRect(hwnd: HWND, menu: HMENU, pos: u32, rect: *mut RECT) -> BOOL);
+windows_core::link!("user32.dll" "system" fn GetMenuState(menu: HMENU, pos: u32, flags: u32) -> u32);
+windows_core::link!("user32.dll" "system" fn InvalidateRect(hwnd: HWND, rect: *const RECT, erase: BOOL) -> BOOL);
 
 struct Item {
     menu: HMENU,
@@ -83,6 +93,7 @@ struct Item {
     shortcut: String,
     width: u32,
     separator: bool,
+    toolbar: bool,
 }
 
 struct Skin {
@@ -99,11 +110,16 @@ struct Skin {
     #[allow(clippy::vec_box)] // USER32 holds these addresses, including across Vec growth.
     items: Vec<Box<Item>>,
     menus: Vec<(HMENU, MenuInfo)>,
+    root: HMENU,
+    popup: HWND,
+    actions: Vec<QuickAction>,
+    action_hover: Option<usize>,
+    action_command: Option<u32>,
 }
 
 thread_local! { static ACTIVE: RefCell<Option<Skin>> = const { RefCell::new(None) }; }
 
-fn high_contrast() -> bool {
+pub(crate) fn high_contrast() -> bool {
     let mut hc = HighContrast {
         size: size_of::<HighContrast>() as u32,
         ..Default::default()
@@ -162,7 +178,11 @@ impl Skin {
             let dc = GetDC(None);
             let old_font = SelectObject(dc, HGDIOBJ(self.font.0));
             let mut added = Vec::new();
-            let mut width = self.px(220.0) as u32;
+            let mut width = self.px(if menu == self.root && !self.actions.is_empty() {
+                240.0
+            } else {
+                220.0
+            }) as u32;
             for pos in 0..GetMenuItemCount(Some(menu)).max(0) as u32 {
                 let mut text = [0u16; 1024];
                 let mut info = MENUITEMINFOW {
@@ -199,7 +219,10 @@ impl Skin {
                     &mut measure,
                     0x400 | DT_SINGLELINE as u32,
                 );
-                width = width.max((measure.right - measure.left + self.px(78.0)).max(0) as u32);
+                let toolbar = menu == self.root && pos == 0 && !self.actions.is_empty();
+                if !toolbar {
+                    width = width.max((measure.right - measure.left + self.px(78.0)).max(0) as u32);
+                }
                 info.dwTypeData = windows_core::PWSTR::null();
                 info.cch = 0;
                 let mut item = Box::new(Item {
@@ -210,6 +233,7 @@ impl Skin {
                     shortcut: shortcut.into(),
                     width: 0,
                     separator: info.fType & MFT_SEPARATOR as u32 != 0,
+                    toolbar,
                 });
                 let data = (&mut *item as *mut Item) as usize;
                 let change = MENUITEMINFOW {
@@ -242,7 +266,56 @@ impl Skin {
             let saved = SaveDC(draw.dc);
             let _ = FillRect(draw.dc, &draw.rect, self.background);
             let mut r = draw.rect;
-            if item.separator {
+            if item.toolbar {
+                let count = self.actions.len() as i32;
+                let pad = self.px(8.0);
+                let step = (r.right - r.left - pad * 2) / count;
+                let hovered = self.action_hover.or_else(|| {
+                    (draw.state & 1 != 0)
+                        .then(|| self.actions.iter().position(|a| !a.disabled))
+                        .flatten()
+                });
+                for (i, action) in self.actions.iter().enumerate() {
+                    let left = r.left + pad + i as i32 * step;
+                    if hovered == Some(i) && !action.disabled {
+                        let _ = SelectObject(draw.dc, HGDIOBJ(self.hover.0));
+                        let _ = SelectObject(draw.dc, self.hover_pen);
+                        let round = self.px(8.0);
+                        let _ = RoundRect(
+                            draw.dc,
+                            left + self.px(4.0),
+                            r.top + self.px(4.0),
+                            left + step - self.px(4.0),
+                            r.bottom - self.px(4.0),
+                            round,
+                            round,
+                        );
+                    }
+                    let _ = SetBkMode(draw.dc, 1);
+                    let _ = SetTextColor(
+                        draw.dc,
+                        COLORREF(if action.disabled {
+                            color(0x999999, 0x808080, self.dark)
+                        } else {
+                            color(0x1b1b1b, 0xf5f5f5, self.dark)
+                        }),
+                    );
+                    let _ = SelectObject(draw.dc, HGDIOBJ(self.glyph.0));
+                    let glyph = to_wide(&action.glyph.to_string());
+                    let mut box_ = RECT {
+                        left,
+                        right: left + step,
+                        ..r
+                    };
+                    let _ = DrawTextW(
+                        draw.dc,
+                        PCWSTR(glyph.as_ptr()),
+                        -1,
+                        &mut box_,
+                        (DT_CENTER | DT_VCENTER | DT_SINGLELINE) as u32,
+                    );
+                }
+            } else if item.separator {
                 let line = RECT {
                     left: r.left + self.px(12.0),
                     right: r.right - self.px(12.0),
@@ -371,12 +444,128 @@ impl Skin {
     }
 }
 
+/// Only filters this UI thread's menu loop. Toolbar commands finish the same native menu
+/// transaction as ordinary rows; no process-wide mouse hook or second popup loop is used.
+unsafe extern "system" fn menu_filter(code: i32, wp: usize, lp: isize) -> isize {
+    let mut finish = false;
+    let mut repaint = HWND::default();
+    let handled = if code == 2 && lp != 0 {
+        let msg = unsafe { &*(lp as *const MSG) };
+        ACTIVE.with(|a| {
+            let mut guard = a.borrow_mut();
+            let Some(s) = guard.as_mut() else {
+                return false;
+            };
+            if s.actions.is_empty() || s.popup.0.is_null() {
+                return false;
+            }
+            let mut rect = RECT::default();
+            if !unsafe { GetMenuItemRect(HWND::default(), s.root, 0, &mut rect) }.as_bool() {
+                return false;
+            }
+            match msg.message {
+                0x0200..=0x0202 => {
+                    let p = msg.pt;
+                    let inside = p.x >= rect.left
+                        && p.x < rect.right
+                        && p.y >= rect.top
+                        && p.y < rect.bottom;
+                    let hover = if inside {
+                        let pad = s.px(8.0);
+                        let step = (rect.right - rect.left - pad * 2) / s.actions.len() as i32;
+                        let x = p.x - rect.left - pad;
+                        (x >= 0 && x < step * s.actions.len() as i32)
+                            .then_some((x.max(0) / step.max(1)) as usize)
+                    } else {
+                        None
+                    };
+                    if s.action_hover != hover {
+                        s.action_hover = hover;
+                        repaint = s.popup;
+                    }
+                    if inside && msg.message == 0x0202 {
+                        if let Some(i) = hover
+                            && !s.actions[i].disabled
+                        {
+                            s.action_command = Some(s.actions[i].id);
+                            finish = true;
+                        }
+                        return true;
+                    }
+                    inside && msg.message == 0x0201
+                }
+                0x0100 if unsafe { GetMenuState(s.root, 0, 0x400) } & 0x80 != 0 => {
+                    match msg.wParam.0 as u32 {
+                        0x25 | 0x27 => {
+                            let n = s.actions.len();
+                            let direction = if msg.wParam.0 == 0x25 { n - 1 } else { 1 };
+                            let first = s.action_hover.unwrap_or_else(|| {
+                                s.actions.iter().position(|a| !a.disabled).unwrap_or(0)
+                            });
+                            for step in 1..=n {
+                                let i = (first + direction * step) % n;
+                                if !s.actions[i].disabled {
+                                    s.action_hover = Some(i);
+                                    break;
+                                }
+                            }
+                            repaint = s.popup;
+                            true
+                        }
+                        0x0D | 0x20 => {
+                            let selected = s
+                                .action_hover
+                                .or_else(|| s.actions.iter().position(|a| !a.disabled));
+                            if let Some(i) = selected
+                                && !s.actions[i].disabled
+                            {
+                                s.action_command = Some(s.actions[i].id);
+                                finish = true;
+                            }
+                            true
+                        }
+                        _ => false,
+                    }
+                }
+                _ => false,
+            }
+        })
+    } else {
+        false
+    };
+    if !repaint.0.is_null() {
+        let _ = unsafe { InvalidateRect(repaint, core::ptr::null(), BOOL(0)) };
+    }
+    if finish {
+        let _ = unsafe { EndMenu() };
+    }
+    if handled {
+        1
+    } else {
+        unsafe { CallNextHookEx(core::ptr::null_mut(), code, wp, lp) }
+    }
+}
+
 pub(crate) struct Session {
     hook: HWINEVENTHOOK,
+    filter: FilterHook,
 }
 
 impl Session {
+    #[cfg(test)]
     pub(crate) fn begin(menu: HMENU, owner: HWND) -> Option<Self> {
+        Self::begin_with_actions(menu, owner, &[])
+    }
+
+    pub(crate) fn command(&self) -> Option<u32> {
+        ACTIVE.with(|a| a.borrow().as_ref().and_then(|s| s.action_command))
+    }
+
+    pub(crate) fn begin_with_actions(
+        menu: HMENU,
+        owner: HWND,
+        actions: &[QuickAction],
+    ) -> Option<Self> {
         let contrast = high_contrast();
         if contrast || ACTIVE.with(|a| a.borrow().is_some()) {
             tracing::debug!(contrast, "native menu presentation skipped");
@@ -409,8 +598,8 @@ impl Session {
             let mut skin = Skin {
                 scale,
                 dark,
-                font: font("Segoe UI", FW_NORMAL),
-                bold: font("Segoe UI", FW_SEMIBOLD),
+                font: font("Microsoft YaHei UI", FW_NORMAL),
+                bold: font("Microsoft YaHei UI", FW_SEMIBOLD),
                 glyph: font("Segoe Fluent Icons", FW_NORMAL),
                 background: CreateSolidBrush(COLORREF(color(0xf9f9f9, 0x2b2b2b, dark))),
                 hover: CreateSolidBrush(COLORREF(hover)),
@@ -418,6 +607,11 @@ impl Session {
                 hover_pen: CreatePen(0, 1, COLORREF(hover)),
                 items: Vec::new(),
                 menus: Vec::new(),
+                root: menu,
+                popup: HWND::default(),
+                actions: actions.to_vec(),
+                action_hover: None,
+                action_command: None,
             };
             skin.prepare(menu);
             tracing::info!(
@@ -436,7 +630,17 @@ impl Session {
                 GetCurrentThreadId(),
                 WINEVENT_OUTOFCONTEXT as u32,
             );
-            Some(Self { hook })
+            let filter = if actions.is_empty() {
+                core::ptr::null_mut()
+            } else {
+                SetWindowsHookExW(
+                    -1,
+                    Some(menu_filter),
+                    core::ptr::null_mut(),
+                    GetCurrentThreadId(),
+                )
+            };
+            Some(Self { hook, filter })
         }
     }
 }
@@ -455,6 +659,14 @@ unsafe extern "system" fn popup_started(
     }
     let dark = ACTIVE.with(|a| a.borrow().as_ref().map(|s| s.dark));
     if let Some(dark) = dark {
+        let menu = unsafe { SendMessageW(hwnd, 0x01E1, WPARAM(0), LPARAM(0)) };
+        ACTIVE.with(|a| {
+            if let Some(s) = a.borrow_mut().as_mut()
+                && s.root.0 as isize == menu.0
+            {
+                s.popup = hwnd;
+            }
+        });
         // SAFETY: the in-process, UI-thread-scoped WinEvent callback supplied the popup HWND.
         // Disabling its legacy theme lets MENUINFO's brush also cover the outer padding.
         unsafe {
@@ -470,6 +682,9 @@ impl Drop for Session {
     fn drop(&mut self) {
         // SAFETY: stop callbacks before releasing the menu's attached data and GDI resources.
         unsafe {
+            if !self.filter.is_null() {
+                let _ = UnhookWindowsHookEx(self.filter);
+            }
             if !self.hook.0.is_null() {
                 let _ = UnhookWinEvent(self.hook);
             }
@@ -551,7 +766,13 @@ pub(crate) fn forward(message: u32, wparam: usize, lparam: isize) -> Option<isiz
                         "measuring styled menu item"
                     );
                     measure.width = item.width;
-                    measure.height = skin.px(if item.separator { 9.0 } else { 32.0 }) as u32;
+                    measure.height = skin.px(if item.toolbar {
+                        44.0
+                    } else if item.separator {
+                        9.0
+                    } else {
+                        32.0
+                    }) as u32;
                     Some(1)
                 }
                 m if m == WM_DRAWITEM as u32 && lparam != 0 => {
