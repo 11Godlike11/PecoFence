@@ -386,8 +386,22 @@ impl App {
     }
 
     pub(super) fn on_display_changed(&mut self) {
+        let started = Instant::now();
+        let fresh = work_areas();
+        // Fullscreen games also broadcast display/work-area notifications when the
+        // desktop returns at the same resolution and DPI. Rebuilding wallpaper and
+        // clearing every icon texture here blocked the UI for ~160-200 ms per return.
+        // Only a real geometry change needs layout/material invalidation; wallpaper
+        // and theme changes have their own notification and recovery paths.
+        if fresh == self.state.work_areas {
+            tracing::debug!(
+                elapsed_ms = started.elapsed().as_millis(),
+                "display notification: geometry unchanged; retaining caches"
+            );
+            return;
+        }
         self.end_peek_now();
-        self.state.work_areas = work_areas();
+        self.state.work_areas = fresh;
         self.state.ensure_layout();
         // A different monitor set may select a different layout: sync windows first.
         self.sync_fence_windows();
@@ -417,6 +431,10 @@ impl App {
         }
         // Wallpaper regions moved with the monitors: rebuild the backdrops unconditionally.
         self.refresh_visuals(true);
+        tracing::info!(
+            elapsed_ms = started.elapsed().as_millis(),
+            "display geometry changed; layout and backdrops refreshed"
+        );
     }
 
     pub fn toggle_all_fences(&mut self) {

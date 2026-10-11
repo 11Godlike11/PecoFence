@@ -46,6 +46,14 @@ maximized/full-screen applications, the glass keeps the current paused frame.
   skipped. Actual delivery also depends on capture cost and WPE's playback rate.
 - Live updates share the compositor frame clock with fence animations. A 100 ms
   fallback poll detects returning focus; there is no competing 60 Hz UI timer.
+- As of `we.16`, display/work-area notifications compare current monitor geometry
+  with the applied layout before invalidating anything. A fullscreen return at
+  unchanged resolution, work area and DPI retains wallpaper and icon textures.
+  Actual geometry changes still perform the existing layout/material refresh.
+  On the development machine, four same-resolution display broadcasts previously
+  caused four UI message delays above 50 ms (maximum 159.7 ms); the updated installed
+  build had none (maximum 16.0 ms). This checks the notification path, not a real
+  exclusive-fullscreen game exit or sustained glass frame rate.
 - Switching to another application, including a full-screen application, suspends
   live capture immediately and gradually fades liquid material to ordinary window
   transparency. The last captured image becomes invisible; Windows displays the
