@@ -1,17 +1,19 @@
-//! Icon/thumbnail cache. Extraction runs on MTA worker threads; the UI thread gets a
+//! Icon/thumbnail cache. Extraction runs on STA worker threads; the UI thread gets a
 //! `WM_APP_ICON_READY` poke and drains finished results.
 
 use pecofence_core::IconKey;
+use pecofence_core::cache::BudgetCache;
 use pecofence_platform::HWND;
 use pecofence_platform::com::OleGuard;
 use pecofence_platform::shell;
 use pecofence_platform::window;
 use pecofence_render::Image;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, channel};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 pub const WM_APP_ICON_READY: u32 = pecofence_platform::msg::WM_APP + 4;
@@ -73,6 +75,10 @@ struct Request {
     size_px: u32,
     icon_only: bool,
     variant: IconVariant,
+    id: u64,
+    valid: Arc<AtomicBool>,
+    started: Arc<AtomicBool>,
+    visible: bool,
 }
 
 /// An extraction in flight (or waiting for a retry), with how often it has failed so far.
@@ -91,6 +97,8 @@ const RETRY_DELAYS_MS: [u64; 3] = [400, 1500, 4000];
 struct Ready {
     key: String,
     size_px: u32,
+    icon_only: bool,
+    id: u64,
     image: Option<Image>,
 }
 
@@ -101,40 +109,103 @@ pub enum Lookup {
     Pending,
 }
 
+type CacheKey = (String, u32, bool);
+
+#[derive(Default)]
+struct QueuedWork {
+    visible: VecDeque<Request>,
+    prefetch: VecDeque<Request>,
+    closed: bool,
+}
+
+#[derive(Default)]
+struct WorkQueue {
+    work: Mutex<QueuedWork>,
+    signal: Condvar,
+}
+
+impl WorkQueue {
+    fn push(&self, request: Request) {
+        let mut work = self.work.lock().unwrap_or_else(|e| e.into_inner());
+        if work.closed {
+            return;
+        }
+        if request.visible {
+            work.visible.push_back(request);
+        } else {
+            work.prefetch.push_back(request);
+        }
+        self.signal.notify_one();
+    }
+
+    fn next(&self) -> Option<Request> {
+        let mut work = self.work.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if work.closed {
+                return None;
+            }
+            if let Some(request) = work
+                .visible
+                .pop_front()
+                .or_else(|| work.prefetch.pop_front())
+            {
+                if request.valid.load(Ordering::Acquire)
+                    && request
+                        .started
+                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                {
+                    return Some(request);
+                }
+                continue;
+            }
+            work = self.signal.wait(work).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+
+    fn close(&self) {
+        let mut work = self.work.lock().unwrap_or_else(|e| e.into_inner());
+        work.closed = true;
+        work.visible.clear();
+        work.prefetch.clear();
+        self.signal.notify_all();
+    }
+}
+
 pub struct IconCache {
-    map: HashMap<(String, u32), Option<Rc<Image>>>,
-    pending: HashMap<(String, u32), InFlight>,
-    /// Failed extractions waiting to be re-queued (`due`, key); `flush_retries` sends them.
-    retry: Vec<(Instant, (String, u32))>,
-    tx: Sender<Request>,
+    map: BudgetCache<CacheKey, Option<Rc<Image>>>,
+    pending: HashMap<CacheKey, InFlight>,
+    retry: Vec<(Instant, CacheKey)>,
+    work: Arc<WorkQueue>,
     rx: Receiver<Ready>,
     variant: IconVariant,
+    next_id: u64,
+    discarded: u64,
+}
+
+impl Drop for IconCache {
+    fn drop(&mut self) {
+        for pending in self.pending.values() {
+            pending.req.valid.store(false, Ordering::Release);
+        }
+        self.work.close();
+    }
 }
 
 impl IconCache {
-    /// Spawns the worker threads; results wake `notify` with `WM_APP_ICON_READY`.
     pub fn new(notify: HWND) -> Self {
-        let (tx, work_rx) = channel::<Request>();
+        let work = Arc::new(WorkQueue::default());
         let (done_tx, rx) = channel::<Ready>();
-        let work_rx = Arc::new(Mutex::new(work_rx));
         let notify_raw = notify.0 as isize;
         for i in 0..WORKERS {
-            let work_rx = work_rx.clone();
+            let work = work.clone();
             let done_tx = done_tx.clone();
             let _ = std::thread::Builder::new()
                 .name(format!("pecofence-icons-{i}"))
                 .stack_size(256 * 1024)
                 .spawn(move || {
-                    // Single-threaded apartment on purpose: the shell's icon handlers for
-                    // Internet shortcuts (.url → IconFile) hand back the generic document icon
-                    // from an MTA thread; Explorer extracts icons on STA threads too.
                     let _sta = OleGuard::init();
-                    loop {
-                        let req = {
-                            let Ok(guard) = work_rx.lock() else { break };
-                            guard.recv()
-                        };
-                        let Ok(req) = req else { break };
+                    while let Some(req) = work.next() {
                         let image = shell::shell_image(&req.path, req.size_px, req.icon_only)
                             .ok()
                             .map(|img| {
@@ -146,10 +217,15 @@ impl IconCache {
                                 req.variant.apply(&mut image);
                                 image
                             });
+                        if !req.valid.load(Ordering::Acquire) {
+                            continue;
+                        }
                         if done_tx
                             .send(Ready {
                                 key: req.key,
                                 size_px: req.size_px,
+                                icon_only: req.icon_only,
+                                id: req.id,
                                 image,
                             })
                             .is_err()
@@ -165,13 +241,19 @@ impl IconCache {
                     }
                 });
         }
+        Self::with_queue(work, rx)
+    }
+
+    fn with_queue(work: Arc<WorkQueue>, rx: Receiver<Ready>) -> Self {
         Self {
-            map: HashMap::new(),
+            map: BudgetCache::new(512, 16 * 1024 * 1024),
             pending: HashMap::new(),
             retry: Vec::new(),
-            tx,
+            work,
             rx,
             variant: IconVariant::default(),
+            next_id: 0,
+            discarded: 0,
         }
     }
 
@@ -184,6 +266,9 @@ impl IconCache {
         }
         self.variant = variant;
         self.map.clear();
+        for pending in self.pending.values() {
+            pending.req.valid.store(false, Ordering::Release);
+        }
         self.pending.clear();
         self.retry.clear();
         true
@@ -198,33 +283,68 @@ impl IconCache {
 
     /// Cached image, or queues extraction and reports `Pending`.
     pub fn get(&mut self, key: &IconKey, path: &Path, size_px: u32, icon_only: bool) -> Lookup {
+        self.lookup(key, path, size_px, icon_only, true)
+    }
+
+    pub fn prefetch(
+        &mut self,
+        key: &IconKey,
+        path: &Path,
+        size_px: u32,
+        icon_only: bool,
+    ) -> Lookup {
+        self.lookup(key, path, size_px, icon_only, false)
+    }
+
+    fn lookup(
+        &mut self,
+        key: &IconKey,
+        path: &Path,
+        size_px: u32,
+        icon_only: bool,
+        visible: bool,
+    ) -> Lookup {
         let k = (
             format!("{}{}", Self::cache_key(key), self.variant.suffix()),
             size_px,
+            icon_only,
         );
         if let Some(entry) = self.map.get(&k) {
             return Lookup::Ready(entry.clone());
         }
-        if !self.pending.contains_key(&k) {
+        if let Some(pending) = self.pending.get_mut(&k) {
+            if visible && !pending.req.visible {
+                pending.req.visible = true;
+                if !pending.req.started.load(Ordering::Acquire) {
+                    self.work.push(pending.req.clone());
+                }
+            }
+        } else {
+            self.next_id = self.next_id.wrapping_add(1);
             let req = Request {
                 key: k.0.clone(),
                 path: path.to_path_buf(),
                 size_px,
                 icon_only,
                 variant: self.variant,
+                id: self.next_id,
+                valid: Arc::new(AtomicBool::new(true)),
+                started: Arc::new(AtomicBool::new(false)),
+                visible,
             };
-            let _ = self.tx.send(req.clone());
+            self.work.push(req.clone());
             self.pending.insert(k, InFlight { req, attempts: 0 });
         }
         Lookup::Pending
     }
 
     /// Bitmap-cache key for an icon as currently processed (variant suffix included).
-    pub fn draw_key(&self, key: &IconKey, size_px: u32) -> String {
+    pub fn draw_key(&self, key: &IconKey, size_px: u32, icon_only: bool) -> String {
         format!(
-            "{}{}@{}",
+            "{}{}#mode{}@{}",
             Self::cache_key(key),
             self.variant.suffix(),
+            icon_only as u8,
             size_px
         )
     }
@@ -234,7 +354,15 @@ impl IconCache {
         let mut n = 0;
         let now = Instant::now();
         while let Ok(r) = self.rx.try_recv() {
-            let k = (r.key, r.size_px);
+            let k = (r.key, r.size_px, r.icon_only);
+            if !self
+                .pending
+                .get(&k)
+                .is_some_and(|f| f.req.id == r.id && f.req.valid.load(Ordering::Acquire))
+            {
+                self.discarded += 1;
+                continue;
+            }
             if r.image.is_none()
                 && let Some(f) = self.pending.get_mut(&k)
                 && f.attempts < RETRY_ATTEMPTS
@@ -250,7 +378,8 @@ impl IconCache {
                 continue;
             }
             self.pending.remove(&k);
-            self.map.insert(k, r.image.map(Rc::new));
+            let bytes = r.image.as_ref().map_or(0, |image| image.bgra.len());
+            self.map.insert(k, r.image.map(Rc::new), bytes);
             n += 1;
         }
         n
@@ -265,7 +394,8 @@ impl IconCache {
             if self.retry[i].0 <= now {
                 let (_, k) = self.retry.swap_remove(i);
                 if let Some(f) = self.pending.get(&k) {
-                    let _ = self.tx.send(f.req.clone());
+                    f.req.started.store(false, Ordering::Release);
+                    self.work.push(f.req.clone());
                 }
             } else {
                 i += 1;
@@ -282,12 +412,28 @@ impl IconCache {
         let hit = |k: &str| {
             (k.starts_with(&prefix) && k[prefix.len()..].starts_with(['#'])) || k == prefix
         };
-        self.map.retain(|(k, _), _| !hit(k));
-        self.pending.retain(|(k, _), _| !hit(k));
-        self.retry.retain(|(_, (k, _))| !hit(k));
+        self.map.retain(|(k, _, _), _| !hit(k));
+        self.pending.retain(|(k, _, _), pending| {
+            if hit(k) {
+                pending.req.valid.store(false, Ordering::Release);
+                false
+            } else {
+                true
+            }
+        });
+        self.retry.retain(|(_, (k, _, _))| !hit(k));
     }
 
-    #[allow(dead_code)]
+    pub fn bytes(&self) -> usize {
+        self.map.bytes()
+    }
+    pub fn pending_len(&self) -> usize {
+        self.pending.len()
+    }
+    pub fn discarded(&self) -> u64 {
+        self.discarded
+    }
+
     pub fn len(&self) -> usize {
         self.map.len()
     }
@@ -367,6 +513,148 @@ pub fn icon_key_for(path: &Path, is_folder: bool, mtime: i64) -> (IconKey, bool)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fixture() -> (IconCache, std::sync::mpsc::Sender<Ready>) {
+        let (tx, rx) = channel();
+        (
+            IconCache::with_queue(Arc::new(WorkQueue::default()), rx),
+            tx,
+        )
+    }
+
+    fn complete(tx: &std::sync::mpsc::Sender<Ready>, req: &Request, pixel: u8) {
+        tx.send(Ready {
+            key: req.key.clone(),
+            size_px: req.size_px,
+            icon_only: req.icon_only,
+            id: req.id,
+            image: Some(Image {
+                width: 1,
+                height: 1,
+                bgra: vec![pixel; 4],
+            }),
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn late_result_after_refresh_cannot_replace_or_remove_the_new_request() {
+        let (mut cache, tx) = fixture();
+        let key = IconKey::ByExt(".txt".into());
+        cache.get(&key, Path::new("fixture.txt"), 48, true);
+        let old = cache.work.next().unwrap();
+        cache.invalidate(&key);
+        assert!(!old.valid.load(Ordering::Acquire));
+        cache.get(&key, Path::new("fixture.txt"), 48, true);
+        let new = cache.work.next().unwrap();
+        complete(&tx, &old, 1);
+        assert_eq!(cache.drain_results(), 0);
+        assert_eq!(cache.pending_len(), 1);
+        complete(&tx, &new, 2);
+        assert_eq!(cache.drain_results(), 1);
+        complete(&tx, &old, 1);
+        assert_eq!(cache.drain_results(), 0);
+        let Lookup::Ready(Some(image)) = cache.get(&key, Path::new("fixture.txt"), 48, true) else {
+            panic!("fresh icon missing")
+        };
+        assert_eq!(image.bgra, vec![2; 4]);
+        assert_eq!(cache.discarded(), 2);
+    }
+
+    #[test]
+    fn switching_variant_back_does_not_resurrect_the_previous_generation() {
+        let (mut cache, tx) = fixture();
+        let key = IconKey::ByExt(".txt".into());
+        cache.get(&key, Path::new("fixture.txt"), 48, true);
+        let old = cache.work.next().unwrap();
+        cache.set_variant(IconVariant {
+            chameleon: true,
+            ..Default::default()
+        });
+        cache.set_variant(IconVariant::default());
+        cache.get(&key, Path::new("fixture.txt"), 48, true);
+        complete(&tx, &old, 1);
+        assert_eq!(cache.drain_results(), 0);
+        assert_eq!(cache.pending_len(), 1);
+    }
+
+    #[test]
+    fn queued_cancelled_extractions_are_skipped_before_entering_shell() {
+        let (mut cache, _) = fixture();
+        let key = IconKey::ByExt(".txt".into());
+        cache.get(&key, Path::new("old.txt"), 48, true);
+        cache.invalidate(&key);
+        cache.get(&key, Path::new("new.txt"), 48, true);
+        assert_eq!(cache.work.next().unwrap().path, Path::new("new.txt"));
+    }
+
+    #[test]
+    fn visible_requests_promote_prefetch_and_extract_only_once() {
+        let (mut cache, _) = fixture();
+        let a = IconKey::ByExt(".a".into());
+        let b = IconKey::ByExt(".b".into());
+        cache.prefetch(&a, Path::new("a"), 48, true);
+        cache.prefetch(&b, Path::new("b"), 48, true);
+        cache.get(&b, Path::new("b"), 48, true);
+        cache.get(&b, Path::new("b"), 48, true);
+        let first = cache.work.next().unwrap();
+        assert_eq!(first.path, Path::new("b"));
+        let second = cache.work.next().unwrap();
+        assert_eq!(second.path, Path::new("a"));
+        assert_eq!(cache.pending_len(), 2);
+        assert!(first.started.load(Ordering::Acquire));
+        assert_eq!(cache.work.work.lock().unwrap().prefetch.len(), 1);
+    }
+
+    #[test]
+    fn extraction_mode_has_distinct_cpu_and_gpu_identity() {
+        let (mut cache, tx) = fixture();
+        let key = IconKey::ByExt(".png".into());
+        cache.get(&key, Path::new("image.png"), 48, true);
+        cache.get(&key, Path::new("image.png"), 48, false);
+        let icon = cache.work.next().unwrap();
+        let thumb = cache.work.next().unwrap();
+        complete(&tx, &icon, 1);
+        complete(&tx, &thumb, 2);
+        assert_eq!(cache.drain_results(), 2);
+        assert_ne!(
+            cache.draw_key(&key, 48, true),
+            cache.draw_key(&key, 48, false)
+        );
+        let Lookup::Ready(Some(image)) = cache.get(&key, Path::new("image.png"), 48, false) else {
+            panic!("thumbnail missing")
+        };
+        assert_eq!(image.bgra, vec![2; 4]);
+    }
+
+    #[test]
+    fn large_batches_evict_cpu_images_at_the_byte_budget() {
+        let (mut cache, tx) = fixture();
+        for index in 0..400 {
+            let key = IconKey::ByContent {
+                path: format!("fixture-{index}.png"),
+                mtime: 1,
+            };
+            cache.get(&key, Path::new("fixture.png"), 128, false);
+            let req = cache.work.next().unwrap();
+            tx.send(Ready {
+                key: req.key,
+                size_px: req.size_px,
+                icon_only: req.icon_only,
+                id: req.id,
+                image: Some(Image {
+                    width: 128,
+                    height: 128,
+                    bgra: vec![255; 128 * 128 * 4],
+                }),
+            })
+            .unwrap();
+            assert_eq!(cache.drain_results(), 1);
+        }
+        assert_eq!(cache.bytes(), 16 * 1024 * 1024);
+        assert_eq!(cache.len(), 256);
+        assert_eq!(cache.pending_len(), 0);
+    }
 
     #[test]
     fn variant_suffix_ignores_strength_without_tint() {

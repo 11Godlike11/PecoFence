@@ -2,15 +2,23 @@
 
 use crate::backdrop::{Image, MonitorBackdrop};
 use crate::stack::RenderStack;
-use std::collections::HashMap;
+use pecofence_core::cache::BudgetCache;
 use std::rc::Rc;
 use windows_canvas::{Bitmap, DrawingSession};
 use windows_core::{Interface, Result};
 
-#[derive(Default)]
 pub struct BitmapCache {
-    map: HashMap<String, Bitmap>,
+    map: BudgetCache<String, Bitmap>,
     pub(crate) glass_wallpaper: crate::gpu_glass::WallpaperCache,
+}
+
+impl Default for BitmapCache {
+    fn default() -> Self {
+        Self {
+            map: BudgetCache::new(1024, 64 * 1024 * 1024),
+            glass_wallpaper: Default::default(),
+        }
+    }
 }
 
 impl BitmapCache {
@@ -33,7 +41,8 @@ impl BitmapCache {
             return Ok(b.clone());
         }
         let bitmap = session.create_bitmap(&image.bgra, image.width, image.height)?;
-        self.map.insert(key.to_string(), bitmap.clone());
+        self.map
+            .insert(key.to_string(), bitmap.clone(), image.bgra.len());
         Ok(bitmap)
     }
 
@@ -88,5 +97,9 @@ impl BitmapCache {
 
     pub fn len(&self) -> usize {
         self.map.len()
+    }
+
+    pub fn bytes(&self) -> usize {
+        self.map.bytes()
     }
 }

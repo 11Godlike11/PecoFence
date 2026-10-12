@@ -237,7 +237,7 @@ impl FenceViewState {
                 y,
                 w: c.w,
                 h: c.h,
-                icon_key: icons.draw_key(&o.icon_key, icon_px),
+                icon_key: icons.draw_key(&o.icon_key, icon_px, o.icon_only),
                 icon: o.icon,
                 label: o.label.unwrap_or(o.name),
                 date: o.date_label.unwrap_or_default(),

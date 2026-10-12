@@ -1132,7 +1132,9 @@ impl FenceViewState {
             let icons = self.icons.borrow();
             cells
                 .iter()
-                .map(|(i, _)| icons.draw_key(&self.items[*i].icon_key, icon_px))
+                .map(|(i, _)| {
+                    icons.draw_key(&self.items[*i].icon_key, icon_px, self.items[*i].icon_only)
+                })
                 .collect()
         };
         let drawn = match &layout {

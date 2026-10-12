@@ -2,6 +2,30 @@ use super::*;
 use crate::drag_guides::GuideLine;
 
 #[test]
+fn resource_window_prioritizes_visible_rows_and_bounds_adjacent_prefetch() {
+    let view = CellRect {
+        x: 0.0,
+        y: 1000.0,
+        w: 400.0,
+        h: 300.0,
+    };
+    let cell = |x, y| CellRect {
+        x,
+        y,
+        w: 80.0,
+        h: 100.0,
+    };
+    assert_eq!(resource_priority(cell(0.0, 1000.0), view), 2);
+    assert_eq!(resource_priority(cell(0.0, 1299.0), view), 2);
+    assert_eq!(resource_priority(cell(0.0, 1300.0), view), 1);
+    assert_eq!(resource_priority(cell(0.0, 700.0), view), 0);
+    assert_eq!(resource_priority(cell(400.0, 1100.0), view), 0);
+    assert_eq!(resource_priority(cell(-80.0, 1100.0), view), 0);
+    assert_eq!(resource_priority(cell(-79.0, 1100.0), view), 2);
+    assert_eq!(resource_priority(cell(0.0, 1500.0), view), 0);
+}
+
+#[test]
 fn window_drag_cannot_hide_furniture_under_the_taskbar_or_offscreen() {
     let work = rc(-1920, 40, 0, 1040);
     for mut rect in [rc(-2200, -400, -1800, -100), rc(-100, 1000, 300, 1300)] {

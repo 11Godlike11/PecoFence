@@ -38,6 +38,9 @@ pub(super) fn on_showwindow(
     wparam: usize,
     _lparam: isize,
 ) -> Option<isize> {
+    if wparam == 0 {
+        mouse::cancel_pointer_session(h, hwnd, true);
+    }
     let HandlerCtx { view, .. } = h;
     // State under the borrow; the shadow's ShowWindow after it.
     let (shadow, show) = {

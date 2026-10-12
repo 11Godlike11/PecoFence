@@ -717,6 +717,8 @@ impl FenceWindow {
                         (msg::WM_LBUTTONUP, 0, (p.x, p.y))
                     }
                     "escape" => (msg::WM_KEYDOWN, msg::VK_ESCAPE as usize, (0, 0)),
+                    "cancel-mode" => (msg::WM_CANCELMODE, 0, (0, 0)),
+                    "deactivate" => (msg::WM_ACTIVATE, 0, (0, 0)),
                     "right" => (msg::WM_RBUTTONDOWN, 0, (x, y)),
                     _ => return,
                 };

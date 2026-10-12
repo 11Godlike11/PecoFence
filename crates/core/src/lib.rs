@@ -2,6 +2,7 @@
 //! This crate must never depend on Windows APIs so it can be unit-tested anywhere.
 
 pub mod brand;
+pub mod cache;
 pub mod config_store;
 pub mod date_group;
 pub mod geometry;

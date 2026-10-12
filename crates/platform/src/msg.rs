@@ -137,3 +137,6 @@ pub fn lo_u16(wparam: usize) -> u32 {
 pub fn hi_u16(wparam: usize) -> u32 {
     ((wparam >> 16) & 0xffff) as u32
 }
+
+/// USER32 cancels mouse/modal interaction before menus or external activation.
+pub const WM_CANCELMODE: u32 = 0x001F;

@@ -45,8 +45,16 @@ pub(super) fn focus_session(view: &RefCell<Option<FenceViewState>>, hwnd: HWND) 
 /// Second half of a cancelled tab / tear-off drag, with no borrow held: releases the capture
 /// (WM_CAPTURECHANGED then finds no drag to commit), takes the drop outline and guides down and
 /// hands a torn-off fence back to its host.
-pub(super) fn finish_drag_cancel(cancel: DragCancel, queue: &CommandQueue, behavior: &Behavior) {
-    window::release_capture();
+pub(super) fn finish_drag_cancel(
+    cancel: DragCancel,
+    queue: &CommandQueue,
+    behavior: &Behavior,
+    owner: HWND,
+) {
+    // A capture-loss notification can arrive after another window owns capture.
+    if window::get_capture() == owner {
+        window::release_capture();
+    }
     hide_drag_feedback(behavior);
     let clear_hint = |hinted| {
         if hinted {
@@ -217,6 +225,7 @@ impl FenceWindow {
                     msg::WM_LBUTTONDOWN => mouse::on_lbuttondown(h, hwnd, wparam, lparam),
                     msg::WM_LBUTTONUP => mouse::on_lbuttonup(h, hwnd, wparam, lparam),
                     msg::WM_CAPTURECHANGED => mouse::on_capturechanged(h, hwnd, wparam, lparam),
+                    msg::WM_CANCELMODE => mouse::on_cancelmode(h, hwnd, wparam, lparam),
                     msg::WM_KEYDOWN => keyboard::on_keydown(h, hwnd, wparam, lparam),
                     msg::WM_CHAR => keyboard::on_char(h, hwnd, wparam, lparam),
                     msg::WM_SYSKEYDOWN => keyboard::on_syskeydown(h, hwnd, wparam, lparam),

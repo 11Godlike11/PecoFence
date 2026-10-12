@@ -477,69 +477,62 @@ pub(super) fn on_lbuttonup(
     Some(0)
 }
 
+/// Abort without committing position, tab order or a merge. Normal mouse-up takes these
+/// states before releasing capture, so its synchronous capture notification is a no-op.
+pub(super) fn cancel_pointer_session(h: &HandlerCtx, hwnd: HWND, release: bool) {
+    let cancel = {
+        let Ok(mut guard) = h.view.try_borrow_mut() else {
+            return;
+        };
+        let Some(v) = guard.as_mut() else {
+            return;
+        };
+        let cancel = v.cancel_tab_or_remote_drag();
+        let drag = v.drag.take().is_some();
+        let pressed = v.clear_pressed().is_some();
+        let marquee = v.end_marquee();
+        if marquee && v.desktop {
+            h.queue
+                .push(Command::DesktopMarquee(anchor::MarqueeEvent::Cancelled));
+        }
+        let column = v.col_drag.take();
+        if let Some(column) = column.as_ref() {
+            v.set_column_width(column.col, column.start_w);
+        }
+        let scroll = v.end_scrollbar_press();
+        v.cancel_pending_rename();
+        v.hide_tip();
+        if drag || pressed || marquee || scroll || column.is_some() {
+            let _ = v.redraw();
+        }
+        cancel
+    };
+    if release && window::get_capture() == hwnd {
+        window::release_capture();
+    }
+    if let Some(cancel) = cancel {
+        tracing::debug!(?hwnd, "pointer session cancelled");
+        finish_drag_cancel(cancel, &h.queue, &h.behavior, hwnd);
+    }
+}
+
 pub(super) fn on_capturechanged(
     h: &HandlerCtx,
     hwnd: HWND,
     _wparam: usize,
     _lparam: isize,
 ) -> Option<isize> {
-    let HandlerCtx { view, queue, .. } = h;
-    let fence_id = h.fence_id;
-    let mut guard = view.borrow_mut();
-    if let Some(v) = guard.as_mut() {
-        v.drag = None;
-        v.clear_pressed();
-        if v.detach_pending || v.remote_drag.is_some() {
-            tracing::info!(
-                ?hwnd,
-                pending = v.detach_pending,
-                remote = v.remote_drag.is_some(),
-                now = ?window::get_capture(),
-                "capture lost during tab tear-off"
-            );
-        }
-        v.detach_pending = false;
-        if let Some(rd) = v.remote_drag.take() {
-            hide_drag_feedback(&v.behavior);
-            for (fence, hwnd) in std::iter::once((rd.fence, rd.hwnd))
-                .chain(rd.group.iter().map(|m| (m.fence, m.hwnd)))
-            {
-                if rd.started {
-                    v.behavior.release_push(hwnd);
-                }
-                queue_bounds_changed(queue, &v.behavior, fence, hwnd);
-            }
-            if rd.merge_target != 0 {
-                queue.push(Command::MergeHint {
-                    target: HWND(std::ptr::null_mut()),
-                    x: 0,
-                });
-            }
-        }
-        let marquee = v.end_marquee();
-        if marquee && v.desktop {
-            queue.push(Command::DesktopMarquee(anchor::MarqueeEvent::Cancelled));
-        }
-        // Losing capture mid tab-drag still commits the order shown.
-        if let Some(td) = v.tab_drag.take() {
-            v.settle_dragged_tab(&td);
-            let _ = v.redraw_chrome_only();
-            if td.index != td.start_index
-                && let Some(tab) = v.tabs.get(td.index).map(|t| t.id)
-            {
-                queue.push(Command::ReorderTab {
-                    host: fence_id,
-                    tab,
-                    to: td.index,
-                });
-            }
-        }
-        v.col_drag = None;
-        let scroll = v.end_scrollbar_press();
-        if marquee || scroll {
-            let _ = v.redraw();
-        }
-    }
+    cancel_pointer_session(h, hwnd, false);
+    Some(0)
+}
+
+pub(super) fn on_cancelmode(
+    h: &HandlerCtx,
+    hwnd: HWND,
+    _wparam: usize,
+    _lparam: isize,
+) -> Option<isize> {
+    cancel_pointer_session(h, hwnd, true);
     Some(0)
 }
 
@@ -642,7 +635,7 @@ pub(super) fn on_rbuttondown(
     });
     match cancel {
         Some(c) => {
-            finish_drag_cancel(c, queue, &h.behavior);
+            finish_drag_cancel(c, queue, &h.behavior, hwnd);
             Some(0)
         }
         None => None,

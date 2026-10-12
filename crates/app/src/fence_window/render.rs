@@ -616,7 +616,12 @@ impl FenceViewState {
 
     /// `label_w` is the width the label must fit: the cell width for icons, the name column's
     /// text width for rows. Changing it drops every fitted label.
-    pub(super) fn ensure_icons_and_labels(&mut self, label_w: f32) {
+    pub(super) fn ensure_icons_and_labels(
+        &mut self,
+        label_w: f32,
+        layout: &ItemLayout,
+        viewport: CellRect,
+    ) {
         let icon_px = (self.icon_dip() * self.scale()).round() as u32;
         if (self.label_w - label_w).abs() > 0.5 {
             self.label_w = label_w;
@@ -629,9 +634,38 @@ impl FenceViewState {
         let now = Instant::now();
         let mut started = false;
         let mut icons = self.icons.borrow_mut();
-        for item in &mut self.items {
+        // Visible resources always enter the urgent queue before a small adjacent prefetch.
+        // Release distant per-item images too: an LRU cannot bound memory if hidden rows
+        // keep every bitmap alive after a long scroll through a large folder.
+        let mut resources = Vec::new();
+        let mut prefetch = Vec::new();
+        for (i, item) in self.items.iter_mut().enumerate() {
+            let priority = if self.item_motion.contains_key(&item.id) {
+                2
+            } else {
+                resource_priority(layout.cell(i), viewport)
+            };
+            if priority == 2 {
+                resources.push((i, true));
+            } else if priority == 1 && prefetch.len() < 48 {
+                prefetch.push((i, false));
+            } else {
+                item.icon = None;
+                item.icon_fade = None;
+                item.icon_waited = false;
+                item.icon_failed = false;
+            }
+        }
+        resources.extend(prefetch);
+        for (i, visible) in resources {
+            let item = &mut self.items[i];
             if item.icon.is_none() && !item.icon_failed {
-                match icons.get(&item.icon_key, &item.path, icon_px, item.icon_only) {
+                let lookup = if visible {
+                    icons.get(&item.icon_key, &item.path, icon_px, item.icon_only)
+                } else {
+                    icons.prefetch(&item.icon_key, &item.path, icon_px, item.icon_only)
+                };
+                match lookup {
                     Lookup::Ready(Some(img)) => {
                         item.icon = Some(img);
                         if item.icon_waited {
@@ -687,9 +721,7 @@ impl FenceViewState {
 
     /// True when some item is still waiting for its icon.
     pub fn has_pending_icons(&self) -> bool {
-        self.items
-            .iter()
-            .any(|i| i.icon.is_none() && !i.icon_failed)
+        self.items.iter().any(|i| i.icon_waited && !i.icon_failed)
     }
 
     /// Redraws the chrome surface only (backdrop/title); the content surface is untouched.
@@ -788,7 +820,16 @@ impl FenceViewState {
         };
         let max_scroll = grid.max_scroll(height_dip);
         self.scroll_y = self.scroll_y.clamp(0.0, max_scroll);
-        self.ensure_icons_and_labels(grid.metrics.cell_w);
+        self.ensure_icons_and_labels(
+            grid.metrics.cell_w,
+            &layout,
+            CellRect {
+                x: 0.0,
+                y: self.scroll_y,
+                w: width_dip,
+                h: height_dip,
+            },
+        );
 
         let now = Instant::now();
         self.prune_content_motion(now);
@@ -829,7 +870,7 @@ impl FenceViewState {
             let px = (self.icon_size as f32 * scale).round() as u32;
             self.items
                 .iter()
-                .map(|i| icons.draw_key(&i.icon_key, px))
+                .map(|i| icons.draw_key(&i.icon_key, px, i.icon_only))
                 .collect()
         };
         // Removed items fade out beneath everything else (painted first).
@@ -964,7 +1005,16 @@ impl FenceViewState {
         self.scroll_y = self.scroll_y.clamp(0.0, max_scroll);
         let cols = self.columns_for(width_dip);
         let text_w = (cols.name_w - metrics.icon - 8.0 - 4.0).max(20.0);
-        self.ensure_icons_and_labels(text_w);
+        self.ensure_icons_and_labels(
+            text_w,
+            &layout,
+            CellRect {
+                x: 0.0,
+                y: self.scroll_y,
+                w: width_dip,
+                h: view_h,
+            },
+        );
 
         let now = Instant::now();
         self.prune_content_motion(now);
@@ -1012,7 +1062,7 @@ impl FenceViewState {
             let icons = self.icons.borrow();
             self.items
                 .iter()
-                .map(|i| icons.draw_key(&i.icon_key, icon_px))
+                .map(|i| icons.draw_key(&i.icon_key, icon_px, i.icon_only))
                 .collect()
         };
         // Removed rows fade out beneath everything else (painted first).
@@ -1171,4 +1221,23 @@ pub(super) fn group_header_draws(
             text: bucket_caption(h.bucket),
         })
         .collect()
+}
+
+/// 2 = visible, 1 = nearby, 0 = outside the resource window. Edges that merely touch
+/// do not intersect; rows below a fixed header use the same content-coordinate rule.
+pub(super) fn resource_priority(cell: CellRect, viewport: CellRect) -> u8 {
+    if viewport.w <= 0.0
+        || viewport.h <= 0.0
+        || cell.x >= viewport.x + viewport.w
+        || cell.x + cell.w <= viewport.x
+    {
+        return 0;
+    }
+    if cell.y < viewport.y + viewport.h && cell.y + cell.h > viewport.y {
+        2
+    } else if cell.y < viewport.y + viewport.h + 200.0 && cell.y + cell.h > viewport.y - 200.0 {
+        1
+    } else {
+        0
+    }
 }

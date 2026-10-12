@@ -6,20 +6,24 @@ use super::*;
 // view). Our own rename popup and a context menu keep the fence "active".
 pub(super) fn on_activate(
     h: &HandlerCtx,
-    _hwnd: HWND,
+    hwnd: HWND,
     wparam: usize,
     lparam: isize,
 ) -> Option<isize> {
     let HandlerCtx { view, .. } = h;
     let inactive = wparam & 0xFFFF == 0;
-    let stays = inactive && {
-        let other = HWND(lparam as *mut core::ffi::c_void);
-        !other.0.is_null() && {
-            let cls = desktop::class_name(desktop::root_ancestor(other));
-            (cls == "PecoFence.Rename" || cls == "#32768")
-                && desktop::window_pid(other) == std::process::id()
-        }
-    };
+    let stays = inactive
+        && (h.menu_open.get() || {
+            let other = HWND(lparam as *mut core::ffi::c_void);
+            !other.0.is_null() && {
+                let cls = desktop::class_name(desktop::root_ancestor(other));
+                (cls == "PecoFence.Rename" || cls == "#32768")
+                    && desktop::window_pid(other) == std::process::id()
+            }
+        });
+    if inactive && !stays {
+        mouse::cancel_pointer_session(h, hwnd, true);
+    }
     if !stays
         && let Ok(mut guard) = view.try_borrow_mut()
         && let Some(v) = guard.as_mut()
@@ -227,7 +231,7 @@ pub(super) fn on_keydown(
             // drag's Esc leaves the selection alone too).
             if let Some(c) = v.cancel_tab_or_remote_drag() {
                 drop(guard);
-                finish_drag_cancel(c, queue, &h.behavior);
+                finish_drag_cancel(c, queue, &h.behavior, _hwnd);
                 return Some(0);
             }
             v.selected.clear();

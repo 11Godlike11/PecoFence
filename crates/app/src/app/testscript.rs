@@ -603,6 +603,12 @@ impl App {
 
     fn test_dump(&self, tag: &str) {
         tracing::info!(target: "pecofence::test", "[{tag}] live_material {}", self.live_render_state());
+        {
+            let icons = self.ctx.icons.borrow();
+            let bitmaps = self.ctx.bitmaps.borrow();
+            tracing::info!(target: "pecofence::test", "[{tag}] resources cpu_entries={} cpu_bytes={} pending={} discarded={} gpu_entries={} gpu_bytes={}",
+                icons.len(), icons.bytes(), icons.pending_len(), icons.discarded(), bitmaps.len(), bitmaps.bytes());
+        }
         for (kind, w) in self
             .fences
             .values()

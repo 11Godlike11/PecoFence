@@ -94,7 +94,7 @@ pub(super) fn on_mousemove(
         let cancel = v.cancel_tab_or_remote_drag();
         drop(guard);
         if let Some(c) = cancel {
-            finish_drag_cancel(c, queue, &h.behavior);
+            finish_drag_cancel(c, queue, &h.behavior, hwnd);
         }
         return Some(0);
     }
